@@ -1,0 +1,42 @@
+# Credentials — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+vault-password*
+secrets.yml
+!secrets.example.yml
+**/credentials.yml
+!**/credentials.example.yml
+
+# Device configuration backups contain real topology and sometimes hashes
+backups/
+!backups/.gitkeep
+configs/live/
+
+# Generated reports
+reports/
+*.html
+!docs/**/*.html
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Ansible
+*.retry
+.ansible/
+
+# containerlab
+clab-*/
+.clab.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
