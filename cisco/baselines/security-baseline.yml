@@ -1,0 +1,464 @@
+---
+# ===========================================================================
+# Network security baseline.
+#
+# The rule set that automation/python/netops/compliance.py audits every device
+# against, nightly.
+#
+# Each rule carries its rationale, because a compliance report that reads as a
+# list of arbitrary demands gets ignored — and an ignored report is worse than
+# no report, since it produces the paperwork of assurance without the assurance.
+#
+# Derived from the CIS Cisco IOS Benchmark and NIST SP 800-53 control families,
+# adapted to this estate. Where a rule deviates from the benchmark, the
+# rationale says so and why.
+# ===========================================================================
+
+metadata:
+  name: Enterprise network security baseline
+  version: "2.1"
+  updated: "2026-08-14"
+  references:
+    - CIS Cisco IOS 17 Benchmark v2.1
+    - NIST SP 800-53 Rev 5 — AC, AU, CM, IA, SC control families
+    - Cisco Guide to Harden Cisco IOS Devices
+
+rules:
+
+  # ---------------------------------------------------------------------
+  # Management plane access
+  # ---------------------------------------------------------------------
+  - id: MGMT-001
+    title: Telnet is disabled on every VTY line
+    severity: critical
+    platforms: [ios, iosxe, nxos]
+    rationale: >-
+      Telnet transmits credentials and session content in clear text. Anyone with
+      access to a span port, a compromised host on the path, or the ability to ARP
+      spoof obtains administrative credentials for the device. There is no
+      circumstance on this network where telnet is the right answer.
+    remediation: "line vty 0 15 / transport input ssh"
+    must_match:
+      - '^\s*transport input ssh\s*$'
+    must_not_match:
+      - '^\s*transport input (all|telnet|ssh telnet|telnet ssh)'
+
+  - id: MGMT-002
+    title: SSH version 2 is enforced
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      SSH version 1 has known integrity weaknesses and permits downgrade. Devices
+      default to accepting both versions, so accepting the default means accepting
+      version 1.
+    remediation: "ip ssh version 2"
+    must_match:
+      - '^ip ssh version 2'
+
+  - id: MGMT-003
+    title: VTY access is restricted by access list
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      Without an access-class, the management interface accepts connection
+      attempts from anywhere that can route to it. Even with strong
+      authentication that is an unnecessary exposure: it allows credential
+      stuffing and brute force from the whole internal network.
+    remediation: "line vty 0 15 / access-class MGMT_ACL in vrf-also"
+    must_match:
+      - '^\s*access-class \S+ in'
+
+  - id: MGMT-004
+    title: Exec timeout is configured on console and VTY lines
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      An abandoned privileged session on an unlocked workstation is an
+      authenticated session available to whoever walks past. The default is
+      10 minutes on some platforms and never on others.
+    remediation: "line con 0 / exec-timeout 15 0"
+    must_match:
+      - '^\s*exec-timeout \d+ \d+'
+    must_not_match:
+      - '^\s*exec-timeout 0 0'
+      - '^\s*no exec-timeout'
+
+  - id: MGMT-005
+    title: The HTTP server is disabled
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      The embedded web server is rarely used for management here and has been the
+      subject of repeated remote code execution advisories. Anything that is not
+      used should not be listening.
+    remediation: "no ip http server / no ip http secure-server"
+    must_match:
+      - '^no ip http server'
+    must_not_match:
+      - '^ip http server\s*$'
+
+  - id: MGMT-006
+    title: A login banner is presented
+    severity: low
+    platforms: [ios, iosxe, nxos]
+    rationale: >-
+      A banner stating that access is authorised-only and monitored is a
+      prerequisite for enforcement action in most jurisdictions. It costs nothing
+      and its absence has cost organisations cases.
+    remediation: "banner login ^ ... ^"
+    must_match:
+      - '^banner (login|motd)'
+
+  # ---------------------------------------------------------------------
+  # Authentication and authorisation
+  # ---------------------------------------------------------------------
+  - id: AAA-001
+    title: AAA is enabled with a centralised server group
+    severity: critical
+    platforms: [ios, iosxe]
+    rationale: >-
+      Local accounts on each device cannot be centrally revoked. When someone
+      leaves, every device has to be visited, and in practice some are missed.
+      Centralised authentication makes offboarding a single action and makes
+      every administrative command attributable to a person.
+    remediation: "aaa new-model; aaa authentication login default group TACACS_SERVERS local"
+    must_match:
+      - '^aaa new-model'
+      - '^aaa authentication login default group \S+ local'
+
+  - id: AAA-002
+    title: Command accounting is enabled for privilege level 15
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      Without command accounting there is no record of what was changed on a
+      device, by whom, or when. After an incident this is the difference between
+      a root cause and a theory.
+    remediation: "aaa accounting commands 15 default start-stop group TACACS_SERVERS"
+    must_match:
+      - '^aaa accounting commands 15 default start-stop group'
+
+  - id: AAA-003
+    title: Passwords are encrypted in the configuration
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      Type 0 (plain text) and type 7 (trivially reversible) passwords are readable
+      by anyone who obtains a configuration file — from a backup, a TFTP server,
+      or a support case attachment. Service password-encryption at least prevents
+      shoulder-surfing; strong hashes prevent the rest.
+    remediation: "service password-encryption; use 'secret 9' rather than 'password'"
+    must_match:
+      - '^service password-encryption'
+    must_not_match:
+      - '^username \S+ password 0 '
+      - '^enable password '
+
+  - id: AAA-004
+    title: The enable secret uses a modern hash
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      Type 5 (MD5) enable secrets are crackable at speed on commodity hardware.
+      Type 8 (PBKDF2) and type 9 (scrypt) are not.
+    remediation: "enable algorithm-type scrypt secret <password>"
+    must_not_match:
+      - '^enable secret 5 '
+
+  # ---------------------------------------------------------------------
+  # SNMP
+  # ---------------------------------------------------------------------
+  - id: SNMP-001
+    title: SNMPv1 and v2c are not configured
+    severity: critical
+    platforms: [ios, iosxe, nxos]
+    rationale: >-
+      A community string is a password sent in clear text on every poll. Read
+      access to a network device's MIB tree exposes the topology, the routing
+      table, the interface list and the ARP cache — a complete map for anyone
+      planning lateral movement.
+    remediation: "Remove snmp-server community; configure SNMPv3 users with authPriv"
+    must_not_match:
+      - '^snmp-server community '
+
+  - id: SNMP-002
+    title: SNMPv3 users use authentication and privacy
+    severity: high
+    platforms: [ios, iosxe]
+    rationale: >-
+      SNMPv3 without privacy (authNoPriv) authenticates the poller but still sends
+      the data in clear text, which gives away the same topology information as v2c.
+    remediation: "snmp-server user <name> <group> v3 auth sha <key> priv aes 256 <key>"
+    must_match:
+      - '^snmp-server user \S+ \S+ v3 auth sha \S+ priv aes'
+
+  - id: SNMP-003
+    title: SNMP access is restricted by access list
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      Even with authPriv, SNMP should only answer the network management stations.
+      Restricting it removes the endpoint as a target for credential attacks.
+    remediation: "snmp-server group <group> v3 priv access MGMT_ACL"
+    must_match:
+      - '^snmp-server group \S+ v3 priv .*access \S+'
+
+  # ---------------------------------------------------------------------
+  # Logging and time
+  # ---------------------------------------------------------------------
+  - id: LOG-001
+    title: Syslog is sent to a central collector
+    severity: high
+    platforms: [ios, iosxe, nxos, asa]
+    rationale: >-
+      A device's local log buffer is small, is lost on reboot, and is the first
+      thing an intruder clears. Central logging preserves the record off the
+      device, and makes correlation across the estate possible at all.
+    remediation: "logging host <collector> transport tcp port 601"
+    must_match:
+      - '^logging (host|server) \S+'
+
+  - id: LOG-002
+    title: Log messages carry timestamps with the timezone
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      A log entry without a timestamp cannot be correlated with anything. One
+      without a timezone is correlated wrongly, which is worse — it produces a
+      confident incident timeline that is several hours out.
+    remediation: "service timestamps log datetime msec localtime show-timezone"
+    must_match:
+      - '^service timestamps log datetime msec localtime show-timezone'
+
+  - id: LOG-003
+    title: Configuration change logging is enabled
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      Records each configuration command as it is entered and forwards it to
+      syslog. This is what answers "what changed?" when the configuration diff
+      shows a change nobody remembers making.
+    remediation: "archive / log config / logging enable / notify syslog"
+    must_match:
+      - '^\s*logging enable'
+
+  - id: TIME-001
+    title: NTP is configured with authentication
+    severity: medium
+    platforms: [ios, iosxe, nxos]
+    rationale: >-
+      Log correlation, certificate validity and Kerberos all depend on the clock.
+      Unauthenticated NTP can be spoofed, and a device convinced it is a year in
+      the future rejects every valid certificate it is shown.
+    remediation: "ntp authenticate; ntp authentication-key; ntp server <server> key <id>"
+    must_match:
+      - '^ntp authenticate'
+      - '^ntp server \S+.*key \d+'
+
+  # ---------------------------------------------------------------------
+  # Routing protocol security
+  # ---------------------------------------------------------------------
+  - id: RTG-001
+    title: OSPF areas use message-digest authentication
+    severity: high
+    platforms: [ios, iosxe, nxos]
+    roles: [core, distribution, wan, datacenter]
+    rationale: >-
+      An unauthenticated OSPF process accepts a route from anything on the segment
+      that can send a hello. Injecting a more specific route redirects traffic
+      through an attacker's host, and the routing table will look entirely normal.
+    remediation: "router ospf <n> / area <x> authentication message-digest"
+    must_match:
+      - '^\s*area \d+(\.\d+\.\d+\.\d+)? authentication message-digest'
+
+  - id: RTG-002
+    title: BGP sessions are authenticated
+    severity: high
+    platforms: [ios, iosxe, nxos]
+    roles: [core, wan]
+    rationale: >-
+      An unauthenticated BGP session can be hijacked by an on-path attacker or
+      reset by a blind TCP attack. The MD5 option is dated but it is what the
+      providers support, and it raises the cost of both attacks substantially.
+    remediation: "neighbor <peer> password <key>"
+    must_match:
+      - '^\s*neighbor \S+ password'
+
+  - id: RTG-003
+    title: BGP peers have a maximum prefix limit
+    severity: medium
+    platforms: [ios, iosxe]
+    roles: [wan]
+    rationale: >-
+      A misconfigured or compromised peer that advertises the full internet table
+      exhausts the router's memory and takes the device down. A prefix limit turns
+      that into a dropped session, which is recoverable.
+    remediation: "neighbor <peer> maximum-prefix <n> 85 restart 30"
+    must_match:
+      - '^\s*neighbor \S+ maximum-prefix \d+'
+
+  # ---------------------------------------------------------------------
+  # Layer 2 security
+  # ---------------------------------------------------------------------
+  - id: L2-001
+    title: BPDU guard is enabled by default on access ports
+    severity: high
+    platforms: [ios, iosxe]
+    roles: [access]
+    rationale: >-
+      A switch plugged into an access port — deliberately or by a user under a
+      desk — can become the spanning tree root and pull the whole VLAN's traffic
+      through it. BPDU guard shuts the port instead.
+    remediation: "spanning-tree portfast bpduguard default"
+    must_match:
+      - '^spanning-tree portfast bpduguard default'
+
+  - id: L2-002
+    title: DHCP snooping is enabled on user VLANs
+    severity: high
+    platforms: [ios, iosxe]
+    roles: [access]
+    rationale: >-
+      A rogue DHCP server hands out its own address as the default gateway and
+      sees every packet leaving the subnet. DHCP snooping also builds the binding
+      table that dynamic ARP inspection and IP source guard depend on, so it has
+      to be right before either of those means anything.
+    remediation: "ip dhcp snooping; ip dhcp snooping vlan <list>"
+    must_match:
+      - '^ip dhcp snooping\s*$'
+      - '^ip dhcp snooping vlan '
+
+  - id: L2-003
+    title: Dynamic ARP inspection is enabled on user VLANs
+    severity: medium
+    platforms: [ios, iosxe]
+    roles: [access]
+    rationale: >-
+      ARP spoofing is the simplest on-path attack on a switched network and needs
+      no privileges beyond a port. DAI validates ARP against the DHCP snooping
+      binding table and drops what does not match.
+    remediation: "ip arp inspection vlan <list>"
+    must_match:
+      - '^ip arp inspection vlan '
+
+  - id: L2-004
+    title: Unused trunk negotiation is disabled
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      Dynamic trunking protocol lets a host negotiate a trunk with the switch and
+      thereby reach every VLAN the trunk carries. It is on by default on many
+      platforms.
+    remediation: "switchport nonegotiate on every configured port"
+    must_match:
+      - '^\s*switchport nonegotiate'
+
+  - id: L2-005
+    title: The native VLAN is not VLAN 1
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      VLAN hopping relies on an untagged frame being accepted into the native
+      VLAN. Moving the native VLAN to an unused, unrouted VLAN means a hopped
+      frame lands nowhere useful.
+    remediation: "switchport trunk native vlan <unused vlan>"
+    must_not_match:
+      - '^\s*switchport trunk native vlan 1\s*$'
+
+  # ---------------------------------------------------------------------
+  # Control plane and general hardening
+  # ---------------------------------------------------------------------
+  - id: CP-001
+    title: Control plane policing is configured
+    severity: medium
+    platforms: [ios, iosxe]
+    roles: [core, distribution, wan]
+    rationale: >-
+      The first thing lost in a broadcast storm or a control-plane flood is the
+      ability to log in and stop it. CoPP reserves enough CPU for management and
+      routing to survive the event that is causing it.
+    remediation: "See cisco/templates/partials/control-plane.j2"
+    must_match:
+      - '^control-plane'
+
+  - id: HARD-001
+    title: IP source routing is disabled
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      Source routing lets a sender dictate the path a packet takes, which bypasses
+      routing policy and can be used to reach segments that the routing table would
+      not send traffic to. It has no legitimate use here.
+    remediation: "no ip source-route"
+    must_match:
+      - '^no ip source-route'
+
+  - id: HARD-002
+    title: Proxy ARP is disabled on user-facing interfaces
+    severity: low
+    platforms: [ios, iosxe]
+    rationale: >-
+      Proxy ARP lets the router answer ARP on behalf of other hosts, which blurs
+      the segment boundary and can be used to map the network. Hosts have had
+      working default gateways for thirty years and do not need it.
+    remediation: "interface <x> / no ip proxy-arp"
+    must_match:
+      - '^\s*no ip proxy-arp'
+
+  - id: HARD-003
+    title: CDP is disabled globally
+    severity: low
+    platforms: [ios, iosxe]
+    rationale: >-
+      CDP advertises the device model, software version, management address and
+      native VLAN to anything on the segment. LLDP is used instead where neighbour
+      discovery is genuinely needed, restricted to infrastructure links.
+    remediation: "no cdp run"
+    must_match:
+      - '^no cdp run'
+
+  - id: HARD-004
+    title: Unused services are disabled
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      Small services, finger, BOOTP and the PAD service are legacy features that
+      remain enabled by default on some images and have no use here.
+    remediation: "no service pad; no ip bootp server; no service finger"
+    must_not_match:
+      - '^service pad\s*$'
+      - '^ip bootp server\s*$'
+      - '^service finger\s*$'
+
+  # ---------------------------------------------------------------------
+  # Segmentation
+  # ---------------------------------------------------------------------
+  - id: SEG-001
+    title: The database segment has an inbound access list
+    severity: critical
+    platforms: [nxos]
+    roles: [datacenter]
+    rationale: >-
+      This is the control that limits the blast radius of an application-tier
+      compromise. The database VLAN should accept PostgreSQL connections from the
+      application segment, replication from its peer, and management from the
+      jump host — and nothing else.
+    remediation: "See cisco/templates/nexus-datacenter.j2, ACL-DATABASE-IN"
+    must_match:
+      - 'ip access-list ACL-DATABASE-IN'
+
+  - id: SEG-002
+    title: Access lists end with an explicit logged deny
+    severity: medium
+    platforms: [ios, iosxe, nxos]
+    rationale: >-
+      The implicit deny at the end of an access list drops silently. An explicit
+      logged deny produces the evidence that something was refused, which is how
+      a missing rule is found — and how an unexpected connection attempt is noticed.
+      The pattern accepts both the extended form (deny ip any any log) and the
+      standard form (deny any log): a standard access list cannot express the
+      extended syntax, so requiring it would fail every management access list on
+      the estate for a form that is not available to it.
+    remediation: "Add 'deny ip any any log' (extended) or 'deny any log' (standard) as the final entry"
+    must_match:
+      - 'deny\s+(?:ip\s+any\s+any|any)\s+log'

@@ -1,0 +1,102 @@
+---
+# ===========================================================================
+# Operational baseline — the configuration that keeps the network supportable,
+# as distinct from the security baseline that keeps it defensible.
+#
+# These rules are lower severity by nature: none of them is an exposure. Each of
+# them is something that makes an outage longer than it needed to be.
+# ===========================================================================
+
+metadata:
+  name: Enterprise network operational baseline
+  version: "1.4"
+  updated: "2026-08-14"
+
+rules:
+
+  - id: OPS-001
+    title: Every interface has a description
+    severity: low
+    platforms: [ios, iosxe, nxos]
+    rationale: >-
+      During an outage, an undescribed interface means someone has to trace a
+      cable or guess. Multiply that by the number of interfaces involved and it is
+      the difference between a fifteen-minute diagnosis and an hour.
+    remediation: "interface <x> / description <what is on the other end>"
+    must_match:
+      - '^\s*description \S+'
+
+  - id: OPS-002
+    title: Unused ports are shut down
+    severity: medium
+    platforms: [ios, iosxe]
+    roles: [access]
+    rationale: >-
+      A port that is merely "not configured" is an open connection into whatever
+      VLAN 1 reaches. Shutting unused ports and parking them in an unrouted VLAN
+      means a patched cable does nothing until somebody intends it to.
+    remediation: "interface range <unused> / switchport access vlan <parking> / shutdown"
+    must_match:
+      - '^\s*description UNUSED'
+
+  - id: OPS-003
+    title: UDLD is enabled on fibre links
+    severity: medium
+    platforms: [ios, iosxe]
+    roles: [core, distribution, datacenter]
+    rationale: >-
+      A unidirectional fibre fault — one strand broken, or a dirty connector —
+      leaves the link up at layer 1 while traffic flows only one way. Spanning tree
+      sees a healthy link and forwards into a black hole. UDLD detects it and errs
+      the port down.
+    remediation: "udld enable aggressive"
+    must_match:
+      - '^udld enable aggressive'
+
+  - id: OPS-004
+    title: Errdisable recovery is configured
+    severity: low
+    platforms: [ios, iosxe]
+    rationale: >-
+      Without automatic recovery, a port shut by BPDU guard or a storm stays down
+      until someone visits it. With it, a transient event self-heals in five
+      minutes and leaves a log entry rather than a ticket.
+    remediation: "errdisable recovery cause <cause>; errdisable recovery interval 300"
+    must_match:
+      - '^errdisable recovery interval \d+'
+
+  - id: OPS-005
+    title: Spanning tree root priority is set explicitly on the core
+    severity: medium
+    platforms: [ios, iosxe]
+    roles: [core, distribution]
+    rationale: >-
+      If the root bridge is chosen by lowest MAC address, it is chosen by accident,
+      and it changes when equipment is replaced. An explicit priority makes the
+      layer 2 topology a design rather than an outcome.
+    remediation: "spanning-tree vlan <list> priority 4096"
+    must_match:
+      - '^spanning-tree vlan .* priority \d+'
+
+  - id: OPS-006
+    title: Load interval is set to 30 seconds on uplinks
+    severity: low
+    platforms: [ios, iosxe]
+    rationale: >-
+      The default five-minute averaging window smooths away exactly the short
+      bursts that cause user-visible problems. Thirty seconds makes a microburst
+      visible in the interface counters.
+    remediation: "interface <uplink> / load-interval 30"
+    must_match:
+      - '^\s*load-interval 30'
+
+  - id: OPS-007
+    title: Configuration archiving is enabled
+    severity: medium
+    platforms: [ios, iosxe]
+    rationale: >-
+      An archive written on every change gives a rollback point without anyone
+      having remembered to create one, which is precisely when it is needed.
+    remediation: "archive / path <server> / write-memory"
+    must_match:
+      - '^\s*write-memory'
