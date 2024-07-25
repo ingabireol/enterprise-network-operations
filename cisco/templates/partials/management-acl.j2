@@ -1,0 +1,10 @@
+{#- The access list that protects the management plane. Applied to the VTY lines
+    and referenced by the SNMP configuration, so there is one list to maintain
+    rather than three that drift apart. -#}
+! --- Management access list ------------------------------------------------
+ip access-list standard {{ snmp.acl_name }}
+ remark Network management stations and jump hosts only
+{% for net in management_networks %}
+ permit {{ net.address }} {{ net.wildcard }}
+{% endfor %}
+ deny   any log

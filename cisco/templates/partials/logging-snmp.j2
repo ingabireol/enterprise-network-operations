@@ -1,0 +1,37 @@
+{#- Logging and SNMP. Both are management-VRF sourced so that a data-plane
+    problem does not also take out the ability to see it. -#}
+! --- Logging ---------------------------------------------------------------
+logging buffered 65536 informational
+logging console critical
+logging trap informational
+logging origin-id hostname
+logging source-interface {{ mgmt_interface }}
+{% for collector in syslog.collectors %}
+logging host {{ collector }} vrf {{ mgmt_vrf }} transport tcp port 601
+{% endfor %}
+logging rate-limit 100 except critical
+!
+archive
+ log config
+  logging enable
+  logging size 500
+  notify syslog contenttype plaintext
+  hidekeys
+!
+! --- SNMPv3 ----------------------------------------------------------------
+snmp-server group {{ snmp.group }} v3 priv read READ_VIEW access {{ snmp.acl_name }}
+snmp-server view READ_VIEW iso included
+{% for user in snmp.users %}
+snmp-server user {{ user.name }} {{ snmp.group }} v3 auth sha {{ user.auth_key }} priv aes 256 {{ user.priv_key }} access {{ snmp.acl_name }}
+{% endfor %}
+snmp-server location {{ site.location_string }}
+snmp-server contact {{ site.contact }}
+snmp-server host {{ snmp.trap_receiver }} vrf {{ mgmt_vrf }} version 3 priv {{ snmp.users[0].name }}
+snmp-server enable traps snmp linkdown linkup coldstart warmstart
+snmp-server enable traps config
+snmp-server enable traps cpu threshold
+snmp-server enable traps envmon fan shutdown supply temperature status
+snmp-server enable traps port-security
+snmp-server enable traps errdisable
+snmp-server ifindex persist
+snmp-server source-interface informs {{ mgmt_interface }}

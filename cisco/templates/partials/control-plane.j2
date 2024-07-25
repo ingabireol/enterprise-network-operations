@@ -1,0 +1,59 @@
+{#- Control plane policing.
+
+    The purpose is narrow and worth stating: keep the CPU reachable during an
+    event that is flooding the device. Without CoPP, the first thing you lose in
+    a broadcast storm is your ability to log in and stop it.
+
+    Rates are deliberately generous for the protocols the network depends on and
+    tight for everything else. -#}
+! --- Control plane policing ------------------------------------------------
+ip access-list extended ACL-CoPP-ROUTING
+ permit ospf any any
+ permit tcp any any eq bgp
+ permit tcp any eq bgp any
+ permit udp any any eq 3784
+ permit udp any any eq 3785
+!
+ip access-list extended ACL-CoPP-MANAGEMENT
+{% for net in management_networks %}
+ permit tcp {{ net.address }} {{ net.wildcard }} any eq 22
+ permit udp {{ net.address }} {{ net.wildcard }} any eq snmp
+ permit udp {{ net.address }} {{ net.wildcard }} any eq ntp
+{% endfor %}
+!
+ip access-list extended ACL-CoPP-MONITORING
+ permit icmp any any echo
+ permit icmp any any echo-reply
+ permit icmp any any ttl-exceeded
+ permit icmp any any port-unreachable
+!
+ip access-list extended ACL-CoPP-UNDESIRABLE
+ permit tcp any any eq telnet
+ permit udp any any eq 161
+ permit tcp any any eq 23
+!
+class-map match-all CM-CoPP-ROUTING
+ match access-group name ACL-CoPP-ROUTING
+class-map match-all CM-CoPP-MANAGEMENT
+ match access-group name ACL-CoPP-MANAGEMENT
+class-map match-all CM-CoPP-MONITORING
+ match access-group name ACL-CoPP-MONITORING
+class-map match-all CM-CoPP-UNDESIRABLE
+ match access-group name ACL-CoPP-UNDESIRABLE
+!
+policy-map PM-CoPP
+ class CM-CoPP-ROUTING
+  ! Routing protocols are never policed into instability. Losing adjacencies
+  ! during an attack turns a degradation into an outage.
+  police 8000000 conform-action transmit exceed-action transmit
+ class CM-CoPP-MANAGEMENT
+  police 4000000 conform-action transmit exceed-action drop
+ class CM-CoPP-MONITORING
+  police 1000000 conform-action transmit exceed-action drop
+ class CM-CoPP-UNDESIRABLE
+  police 8000 conform-action drop exceed-action drop
+ class class-default
+  police 2000000 conform-action transmit exceed-action drop
+!
+control-plane
+ service-policy input PM-CoPP

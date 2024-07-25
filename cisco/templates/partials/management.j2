@@ -1,0 +1,29 @@
+{#- Management plane: VRF, DNS, SSH and time. -#}
+! --- Management plane ------------------------------------------------------
+vrf definition {{ mgmt_vrf }}
+ description Out-of-band management
+ address-family ipv4
+ exit-address-family
+!
+ip domain name {{ site.domain }}
+ip name-server vrf {{ mgmt_vrf }} {{ dns_servers | join(' ') }}
+!
+ip ssh version 2
+ip ssh time-out 60
+ip ssh authentication-retries 3
+ip ssh dh min size 2048
+ip ssh server algorithm encryption aes256-gcm@openssh.com aes256-ctr aes192-ctr
+ip ssh server algorithm mac hmac-sha2-512 hmac-sha2-256
+ip ssh server algorithm kex diffie-hellman-group16-sha512 ecdh-sha2-nistp384
+!
+clock timezone {{ site.timezone_name }} {{ site.timezone_offset }}
+ntp authenticate
+{% for key in ntp.authentication_keys %}
+ntp authentication-key {{ key.id }} md5 {{ key.value_encrypted }} 7
+{% endfor %}
+ntp trusted-key {{ ntp.authentication_keys | map(attribute='id') | join(' ') }}
+{% for server in ntp.servers %}
+ntp server vrf {{ mgmt_vrf }} {{ server.address }} key {{ server.key_id }}{% if server.prefer | default(false) %} prefer{% endif %}
+
+{% endfor %}
+ntp source {{ mgmt_interface }}
