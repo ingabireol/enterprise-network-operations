@@ -1,0 +1,35 @@
+{#- Campus QoS. Trust the marking from the access layer, queue by class. -#}
+! --- QoS -------------------------------------------------------------------
+class-map match-any CM-VOICE
+ match dscp ef
+class-map match-any CM-VIDEO
+ match dscp af41 af42 af43
+class-map match-any CM-CRITICAL-DATA
+ match dscp af31 af32 af33
+class-map match-any CM-TRANSACTIONAL
+ match dscp af21 af22 af23
+class-map match-any CM-SCAVENGER
+ match dscp cs1
+!
+policy-map PM-QUEUE-OUT
+ class CM-VOICE
+  priority level 1
+  police rate percent 10
+ class CM-VIDEO
+  bandwidth remaining percent 20
+  queue-limit 512 packets
+ class CM-CRITICAL-DATA
+  ! The financial platform's own traffic. Marked af31 at the server and given a
+  ! guaranteed share here so that a backup job cannot starve it.
+  bandwidth remaining percent 35
+  random-detect dscp-based
+ class CM-TRANSACTIONAL
+  bandwidth remaining percent 25
+  random-detect dscp-based
+ class CM-SCAVENGER
+  ! Backups and bulk replication. Allowed to use whatever is spare and nothing
+  ! more.
+  bandwidth remaining percent 5
+ class class-default
+  bandwidth remaining percent 15
+  random-detect

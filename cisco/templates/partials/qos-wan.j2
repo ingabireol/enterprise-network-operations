@@ -1,0 +1,49 @@
+{#- WAN QoS. The WAN is the scarce resource, so the shaping here is what
+    actually decides which traffic survives congestion. -#}
+! --- QoS: WAN egress -------------------------------------------------------
+class-map match-any CM-WAN-VOICE
+ match dscp ef
+class-map match-any CM-WAN-CRITICAL
+ match dscp af31 af32 af33
+class-map match-any CM-WAN-REPLICATION
+ ! Database replication to the DR site. Important, but it must yield to
+ ! interactive traffic — a replica a few seconds behind is survivable, a
+ ! platform nobody can use is not.
+ match access-group name ACL-REPLICATION
+class-map match-any CM-WAN-BULK
+ match dscp cs1
+!
+ip access-list extended ACL-REPLICATION
+ permit tcp host {{ replication.primary_address }} host {{ replication.replica_address }} eq 5432
+ permit tcp host {{ replication.replica_address }} host {{ replication.primary_address }} eq 5432
+!
+{% for wan in wan_interfaces %}
+policy-map PM-WAN-SHAPE-{{ wan.bandwidth_mbps }}M
+ class class-default
+  ! Shape below the contracted rate. Policing happens at the provider edge on
+  ! the far side of a queue we do not control; shaping here means our queue
+  ! decides what gets dropped.
+  shape average {{ (wan.bandwidth_mbps * 1000000 * 0.95) | int }}
+  service-policy PM-WAN-EGRESS
+!
+policy-map WAN-EGRESS-{{ wan.bandwidth_mbps }}M
+ class class-default
+  shape average {{ (wan.bandwidth_mbps * 1000000 * 0.95) | int }}
+  service-policy PM-WAN-EGRESS
+!
+{% endfor %}
+policy-map PM-WAN-EGRESS
+ class CM-WAN-VOICE
+  priority percent 15
+ class CM-WAN-CRITICAL
+  bandwidth percent 35
+  random-detect dscp-based
+ class CM-WAN-REPLICATION
+  bandwidth percent 25
+  random-detect
+ class CM-WAN-BULK
+  bandwidth percent 5
+ class class-default
+  bandwidth percent 15
+  fair-queue
+  random-detect

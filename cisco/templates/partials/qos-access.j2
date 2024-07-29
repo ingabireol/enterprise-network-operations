@@ -1,0 +1,22 @@
+{#- Access-layer QoS: classify and mark at the edge, because nothing downstream
+    can tell what an unmarked packet was meant to be. -#}
+! --- QoS: classification and marking at the edge ---------------------------
+class-map match-any CM-VOICE-EDGE
+ match protocol rtp audio
+class-map match-any CM-PLATFORM-EDGE
+ match access-group name ACL-PLATFORM-TRAFFIC
+!
+ip access-list extended ACL-PLATFORM-TRAFFIC
+ remark Traffic to and from the application platform
+ permit tcp any {{ platform_network.address }} {{ platform_network.wildcard }} eq 443
+ permit tcp any {{ platform_network.address }} {{ platform_network.wildcard }} eq 8080
+!
+policy-map PM-MARK-IN
+ class CM-VOICE-EDGE
+  set dscp ef
+ class CM-PLATFORM-EDGE
+  set dscp af31
+ class class-default
+  ! Anything unrecognised is explicitly best-effort. Trusting an endpoint's own
+  ! marking lets any workstation claim priority for itself.
+  set dscp default
