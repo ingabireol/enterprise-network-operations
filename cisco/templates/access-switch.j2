@@ -1,0 +1,225 @@
+{#- ===========================================================================
+    Cisco Catalyst 9300 access switch.
+
+    The access layer is where users, printers and the occasional unmanaged
+    device plug in, so it is where port security, 802.1X and storm control earn
+    their keep. Every user-facing port is configured identically from this
+    template; there are no hand-tuned exceptions.
+    =========================================================================== -#}
+! ===========================================================================
+! {{ hostname }} — Catalyst 9300 access switch, {{ site.name }} / {{ closet }}
+! Generated from cisco/templates/access-switch.j2 — DO NOT EDIT ON THE DEVICE
+! ===========================================================================
+
+version 17.9
+service timestamps debug datetime msec localtime show-timezone
+service timestamps log datetime msec localtime show-timezone
+service password-encryption
+service sequence-numbers
+!
+hostname {{ hostname }}
+!
+{% include 'partials/aaa.j2' %}
+!
+{% include 'partials/management.j2' %}
+!
+{% include 'partials/logging-snmp.j2' %}
+!
+! --- Spanning tree ---------------------------------------------------------
+vtp mode transparent
+vtp domain {{ site.vtp_domain }}
+!
+spanning-tree mode rapid-pvst
+spanning-tree extend system-id
+spanning-tree portfast default
+spanning-tree portfast bpduguard default
+spanning-tree loopguard default
+! Never the root. An access switch becoming root bridge means a loop has formed
+! somewhere it should not have, and the topology has silently inverted.
+spanning-tree vlan 1-4094 priority 61440
+!
+errdisable recovery cause bpduguard
+errdisable recovery cause psecure-violation
+errdisable recovery cause link-flap
+errdisable recovery cause storm-control
+errdisable recovery cause udld
+errdisable recovery cause security-violation
+errdisable recovery interval 300
+udld enable aggressive
+!
+! --- VLANs -----------------------------------------------------------------
+{% for vlan in vlans %}
+vlan {{ vlan.id }}
+ name {{ vlan.name }}
+{% endfor %}
+!
+! --- 802.1X ----------------------------------------------------------------
+{% if dot1x.enabled %}
+aaa authentication dot1x default group RADIUS_SERVERS
+aaa authorization network default group RADIUS_SERVERS
+aaa accounting dot1x default start-stop group RADIUS_SERVERS
+!
+dot1x system-auth-control
+dot1x critical eapol
+!
+aaa group server radius RADIUS_SERVERS
+{% for server in dot1x.radius_servers %}
+ server name RADIUS_{{ loop.index }}
+{% endfor %}
+ ip radius source-interface {{ mgmt_interface }}
+ ! Keep authenticated sessions alive when every RADIUS server is unreachable,
+ ! rather than dropping the whole floor because the authentication server
+ ! rebooted.
+ deadtime 5
+!
+{% for server in dot1x.radius_servers %}
+radius server RADIUS_{{ loop.index }}
+ address ipv4 {{ server.address }} auth-port 1812 acct-port 1813
+ key 7 {{ server.key_encrypted }}
+ automate-tester username radius-probe idle-time 5
+{% endfor %}
+!
+radius-server dead-criteria time 10 tries 3
+radius-server deadtime 5
+!
+! Change of Authorisation, so that the policy server can move a port to a
+! quarantine VLAN without anyone visiting the closet.
+aaa server radius dynamic-author
+{% for server in dot1x.radius_servers %}
+ client {{ server.address }} server-key 7 {{ server.key_encrypted }}
+{% endfor %}
+ auth-type any
+!
+{% endif %}
+!
+! --- DHCP snooping and the protections that depend on it -------------------
+! Order matters: dynamic ARP inspection and IP source guard both read the
+! snooping binding table, so snooping has to be right first.
+ip dhcp snooping
+ip dhcp snooping vlan {{ dhcp_snooping.vlans }}
+no ip dhcp snooping information option
+ip dhcp snooping database flash:dhcp-snooping.db
+ip dhcp snooping database timeout 60
+!
+ip arp inspection vlan {{ dhcp_snooping.vlans }}
+ip arp inspection validate src-mac dst-mac ip
+ip arp inspection log-buffer entries 256
+ip arp inspection log-buffer logs 64 interval 60
+!
+! --- Management interface --------------------------------------------------
+interface {{ mgmt_interface }}
+ description Out-of-band management
+ vrf forwarding {{ mgmt_vrf }}
+ ip address {{ mgmt_ip }} {{ mgmt_mask }}
+ no ip proxy-arp
+ no ip redirects
+ no shutdown
+!
+! --- Uplinks to the core ---------------------------------------------------
+interface Port-channel1
+ description Uplink to {{ uplink.core_hostname }}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ uplink.allowed_vlans }}
+ switchport trunk native vlan {{ stp.native_vlan }}
+ switchport nonegotiate
+ ! Trust the core's QoS marking; rewrite everything from the access ports.
+ trust device none
+ ip dhcp snooping trust
+ ip arp inspection trust
+ load-interval 30
+!
+{% for member in uplink.members %}
+interface {{ member }}
+ description Uplink member to {{ uplink.core_hostname }}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ uplink.allowed_vlans }}
+ switchport trunk native vlan {{ stp.native_vlan }}
+ switchport nonegotiate
+ channel-group 1 mode active
+ ip dhcp snooping trust
+ ip arp inspection trust
+ no shutdown
+!
+{% endfor %}
+!
+! --- Access ports ----------------------------------------------------------
+{% for range in access_port_ranges %}
+interface range {{ range.interfaces }}
+ description {{ range.description }}
+ switchport mode access
+ switchport access vlan {{ range.data_vlan }}
+{% if range.voice_vlan is defined %}
+ switchport voice vlan {{ range.voice_vlan }}
+{% endif %}
+ switchport nonegotiate
+ ! Bound the number of MAC addresses a port will learn. An unmanaged switch
+ ! plugged in under a desk shows up here as a violation instead of as a
+ ! mysterious forwarding problem.
+ switchport port-security
+ switchport port-security maximum {{ range.max_mac | default(3) }}
+ switchport port-security violation restrict
+ switchport port-security aging time 10
+ switchport port-security aging type inactivity
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+ storm-control broadcast level pps 500 250
+ storm-control multicast level pps 1k 500
+ storm-control action shutdown
+{% if dot1x.enabled %}
+ authentication host-mode multi-domain
+ authentication port-control auto
+ authentication periodic
+ authentication timer reauthenticate server
+ authentication violation restrict
+ ! If every RADIUS server is unreachable, put the port in a defined VLAN rather
+ ! than leaving it dead. An authentication outage should not be a site outage.
+ authentication event server dead action authorize vlan {{ dot1x.critical_vlan }}
+ authentication event server alive action reinitialize
+ authentication event fail action authorize vlan {{ dot1x.guest_vlan }}
+ mab
+ dot1x pae authenticator
+ dot1x timeout tx-period 7
+ dot1x max-reauth-req 2
+{% endif %}
+ ip verify source
+ no shutdown
+!
+{% endfor %}
+!
+! --- Unused ports ----------------------------------------------------------
+! Shut down and parked in an unrouted VLAN. An unused port that is merely
+! "not configured" is an open connection to whatever VLAN 1 reaches.
+interface range {{ unused_ports }}
+ description UNUSED — shut down by policy
+ switchport mode access
+ switchport access vlan {{ unused_vlan }}
+ shutdown
+!
+{% include 'partials/qos-access.j2' %}
+!
+{% include 'partials/control-plane.j2' %}
+!
+{% include 'partials/management-acl.j2' %}
+!
+line con 0
+ exec-timeout 15 0
+ logging synchronous
+line vty 0 15
+ exec-timeout 15 0
+ access-class {{ snmp.acl_name }} in vrf-also
+ transport input ssh
+ transport output ssh
+!
+banner login ^
+{{ banner_text }}
+^
+!
+no ip http server
+no ip http secure-server
+no ip source-route
+no ip bootp server
+no service config
+no cdp run
+lldp run
+!
+end

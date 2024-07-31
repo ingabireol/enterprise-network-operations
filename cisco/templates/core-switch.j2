@@ -1,0 +1,370 @@
+{#- ===========================================================================
+    Cisco Catalyst 9500 core / distribution switch — StackWise Virtual pair.
+
+    Renders the full running configuration for a core switch from the device
+    variables in automation/ansible/inventory/. The same template produces both
+    members of the pair; everything that differs between them comes from
+    variables, so the pair cannot drift apart through hand editing.
+    =========================================================================== -#}
+! ===========================================================================
+! {{ hostname }} — Catalyst 9500 core switch, {{ site.name }}
+! Generated from cisco/templates/core-switch.j2 — DO NOT EDIT ON THE DEVICE
+! Any manual change will be flagged by the compliance audit and overwritten.
+! ===========================================================================
+
+version 17.9
+service timestamps debug datetime msec localtime show-timezone
+service timestamps log datetime msec localtime show-timezone
+service password-encryption
+service sequence-numbers
+no service pad
+!
+hostname {{ hostname }}
+!
+! --- Boot and platform -----------------------------------------------------
+boot system flash:cat9k_iosxe.17.09.04a.SPA.bin
+boot-end-marker
+!
+! --- Authentication, authorisation and accounting --------------------------
+! TACACS+ first, local only as the fallback when every server is unreachable.
+! The fallback is deliberate: an authentication outage must not also be a
+! management outage during the incident that caused it.
+aaa new-model
+aaa authentication login default group TACACS_SERVERS local
+aaa authentication enable default group TACACS_SERVERS enable
+aaa authorization exec default group TACACS_SERVERS local if-authenticated
+aaa authorization commands 15 default group TACACS_SERVERS local if-authenticated
+aaa accounting exec default start-stop group TACACS_SERVERS
+aaa accounting commands 15 default start-stop group TACACS_SERVERS
+aaa session-id common
+!
+aaa group server tacacs+ TACACS_SERVERS
+{% for server in aaa.tacacs_servers %}
+ server name TACACS_{{ loop.index }}
+{% endfor %}
+ ip vrf forwarding {{ mgmt_vrf }}
+ ip tacacs source-interface {{ mgmt_interface }}
+!
+{% for server in aaa.tacacs_servers %}
+tacacs server TACACS_{{ loop.index }}
+ address ipv4 {{ server.address }}
+ key 7 {{ server.key_encrypted }}
+ timeout 3
+{% endfor %}
+!
+! Break-glass local account. Documented in docs/runbooks/, password rotated
+! quarterly, and its use is alerted on because a successful local login means
+! TACACS+ is unreachable.
+username {{ local_admin.username }} privilege 15 secret 9 {{ local_admin.secret_hash }}
+!
+! --- Management plane ------------------------------------------------------
+vrf definition {{ mgmt_vrf }}
+ description Out-of-band management — isolated from the data plane
+ address-family ipv4
+ exit-address-family
+!
+ip domain name {{ site.domain }}
+ip name-server vrf {{ mgmt_vrf }} {{ dns_servers | join(' ') }}
+!
+! SSH only. Telnet is not merely unconfigured — it is explicitly refused on
+! every line, so a future default cannot quietly re-enable it.
+ip ssh version 2
+ip ssh time-out 60
+ip ssh authentication-retries 3
+ip ssh dh min size 2048
+ip ssh server algorithm encryption aes256-gcm@openssh.com aes256-ctr aes192-ctr
+ip ssh server algorithm mac hmac-sha2-512 hmac-sha2-256
+ip ssh server algorithm kex diffie-hellman-group16-sha512 ecdh-sha2-nistp384
+crypto key generate rsa modulus 4096 label SSH-KEY
+!
+! --- Time ------------------------------------------------------------------
+! Authenticated NTP. Log correlation across the estate and certificate validity
+! both depend on the clocks agreeing, and an unauthenticated time source is a
+! way to make a device disbelieve a valid certificate.
+clock timezone {{ site.timezone_name }} {{ site.timezone_offset }}
+ntp authenticate
+{% for key in ntp.authentication_keys %}
+ntp authentication-key {{ key.id }} md5 {{ key.value_encrypted }} 7
+{% endfor %}
+ntp trusted-key {{ ntp.authentication_keys | map(attribute='id') | join(' ') }}
+{% for server in ntp.servers %}
+ntp server vrf {{ mgmt_vrf }} {{ server.address }} key {{ server.key_id }}{% if server.prefer | default(false) %} prefer{% endif %}
+
+{% endfor %}
+ntp source {{ mgmt_interface }}
+ntp access-group peer NTP_PEERS
+!
+! --- Logging ---------------------------------------------------------------
+logging buffered 65536 informational
+logging console critical
+logging monitor informational
+logging trap informational
+logging origin-id hostname
+logging source-interface {{ mgmt_interface }}
+{% for collector in syslog.collectors %}
+logging host {{ collector }} vrf {{ mgmt_vrf }} transport tcp port 601
+{% endfor %}
+! Rate limit so that a broadcast storm cannot also become a logging denial of
+! service against the collector.
+logging rate-limit 100 except critical
+archive
+ log config
+  logging enable
+  logging size 500
+  notify syslog contenttype plaintext
+  hidekeys
+!
+! --- SNMP ------------------------------------------------------------------
+! SNMPv3 only, authPriv. v1 and v2c are not configured at all; a community
+! string is a password sent in clear text.
+snmp-server group {{ snmp.group }} v3 priv read READ_VIEW access {{ snmp.acl_name }}
+snmp-server view READ_VIEW iso included
+snmp-server view READ_VIEW internet included
+{% for user in snmp.users %}
+snmp-server user {{ user.name }} {{ snmp.group }} v3 auth sha {{ user.auth_key }} priv aes 256 {{ user.priv_key }} access {{ snmp.acl_name }}
+{% endfor %}
+snmp-server location {{ site.location_string }}
+snmp-server contact {{ site.contact }}
+snmp-server host {{ snmp.trap_receiver }} vrf {{ mgmt_vrf }} version 3 priv {{ snmp.users[0].name }}
+snmp-server enable traps snmp linkdown linkup coldstart warmstart
+snmp-server enable traps config
+snmp-server enable traps cpu threshold
+snmp-server enable traps envmon fan shutdown supply temperature status
+snmp-server enable traps hsrp
+snmp-server enable traps bgp
+snmp-server enable traps ospf state-change
+snmp-server enable traps stackwise
+snmp-server ifindex persist
+snmp-server source-interface informs {{ mgmt_interface }}
+!
+! --- VTP and spanning tree -------------------------------------------------
+! VTP transparent: automatic VLAN propagation has caused more outages than it
+! has prevented, and the VLAN database is managed from this repository anyway.
+vtp mode transparent
+vtp domain {{ site.vtp_domain }}
+!
+spanning-tree mode rapid-pvst
+spanning-tree extend system-id
+spanning-tree portfast bpduguard default
+spanning-tree loopguard default
+{# The core is the root for every VLAN. Priority is set explicitly rather than
+   left to the lowest MAC address, which is not a design. #}
+spanning-tree vlan 1-4094 priority {{ stp.root_priority }}
+!
+! --- Error handling --------------------------------------------------------
+errdisable recovery cause bpduguard
+errdisable recovery cause link-flap
+errdisable recovery cause storm-control
+errdisable recovery cause udld
+errdisable recovery interval 300
+udld enable aggressive
+!
+! --- VLANs -----------------------------------------------------------------
+{% for vlan in vlans %}
+vlan {{ vlan.id }}
+ name {{ vlan.name }}
+{% endfor %}
+!
+! --- StackWise Virtual -----------------------------------------------------
+stackwise-virtual
+ domain {{ svl.domain_id }}
+!
+{% for link in svl.links %}
+interface {{ link }}
+ description StackWise Virtual link to {{ svl.peer_hostname }}
+ stackwise-virtual link 1
+!
+{% endfor %}
+{% for link in svl.dual_active_links %}
+interface {{ link }}
+ description Dual-active detection to {{ svl.peer_hostname }}
+ stackwise-virtual dual-active-detection
+!
+{% endfor %}
+!
+! --- Management interface --------------------------------------------------
+interface {{ mgmt_interface }}
+ description Out-of-band management
+ vrf forwarding {{ mgmt_vrf }}
+ ip address {{ mgmt_ip }} {{ mgmt_mask }}
+ no shutdown
+!
+! --- Routed uplinks --------------------------------------------------------
+{% for uplink in uplinks %}
+interface {{ uplink.interface }}
+ description {{ uplink.description }}
+ no switchport
+ ip address {{ uplink.ip }} {{ uplink.mask }}
+ ip ospf network point-to-point
+ ip ospf {{ ospf.process_id }} area {{ uplink.ospf_area }}
+ ip ospf cost {{ uplink.ospf_cost | default(10) }}
+ ip ospf bfd
+ bfd interval 300 min_rx 300 multiplier 3
+ load-interval 30
+ no shutdown
+!
+{% endfor %}
+!
+! --- Switched Virtual Interfaces (the gateway for each VLAN) ---------------
+{% for vlan in vlans if vlan.svi is defined %}
+interface Vlan{{ vlan.id }}
+ description {{ vlan.name }} — gateway
+ ip address {{ vlan.svi.ip }} {{ vlan.svi.mask }}
+{% if vlan.svi.helper_addresses is defined %}
+{% for helper in vlan.svi.helper_addresses %}
+ ip helper-address {{ helper }}
+{% endfor %}
+{% endif %}
+{% if vlan.svi.acl_in is defined %}
+ ip access-group {{ vlan.svi.acl_in }} in
+{% endif %}
+ no ip redirects
+ no ip proxy-arp
+ ip ospf {{ ospf.process_id }} area {{ vlan.svi.ospf_area | default(0) }}
+{% if vlan.svi.ospf_passive | default(true) %}
+ ! Passive: hosts have no business receiving OSPF hellos.
+{% endif %}
+{% if vlan.svi.hsrp is defined %}
+ standby version 2
+ standby {{ vlan.svi.hsrp.group }} ip {{ vlan.svi.hsrp.vip }}
+ standby {{ vlan.svi.hsrp.group }} priority {{ vlan.svi.hsrp.priority }}
+ standby {{ vlan.svi.hsrp.group }} preempt delay minimum 180
+ standby {{ vlan.svi.hsrp.group }} authentication md5 key-string 7 {{ vlan.svi.hsrp.key_encrypted }}
+ standby {{ vlan.svi.hsrp.group }} timers msec 250 msec 750
+{% for track in vlan.svi.hsrp.track | default([]) %}
+ standby {{ vlan.svi.hsrp.group }} track {{ track.object }} decrement {{ track.decrement }}
+{% endfor %}
+{% endif %}
+ no shutdown
+!
+{% endfor %}
+!
+! --- Downlinks to access switches ------------------------------------------
+{% for downlink in downlinks %}
+interface {{ downlink.interface }}
+ description {{ downlink.description }}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ downlink.allowed_vlans }}
+ switchport nonegotiate
+ ! Explicit native VLAN, never 1, and it carries nothing — VLAN hopping relies
+ ! on an untagged frame landing somewhere useful.
+ switchport trunk native vlan {{ stp.native_vlan }}
+ spanning-tree guard root
+ storm-control broadcast level pps 1k 500
+ storm-control multicast level pps 2k 1k
+ storm-control action trap
+ load-interval 30
+ no shutdown
+!
+{% endfor %}
+!
+! --- Tracking objects ------------------------------------------------------
+{% for obj in track_objects | default([]) %}
+track {{ obj.id }} interface {{ obj.interface }} line-protocol
+{% endfor %}
+!
+! --- Routing: OSPF ---------------------------------------------------------
+router ospf {{ ospf.process_id }}
+ router-id {{ ospf.router_id }}
+ ! Authenticated by default — an unauthenticated IGP accepts routes from
+ ! anything that can send a hello.
+ area 0 authentication message-digest
+{% for area in ospf.areas %}
+{% if area.id != 0 %}
+ area {{ area.id }} authentication message-digest
+{% if area.type is defined %}
+ area {{ area.id }} {{ area.type }}
+{% endif %}
+{% endif %}
+{% endfor %}
+ passive-interface default
+{% for uplink in uplinks %}
+ no passive-interface {{ uplink.interface }}
+{% endfor %}
+ auto-cost reference-bandwidth 100000
+ timers throttle spf 50 200 5000
+ timers throttle lsa 50 200 5000
+ timers lsa arrival 100
+ bfd all-interfaces
+ log-adjacency-changes detail
+ max-lsa 12000
+!
+! --- Routing: BGP to the WAN edge -----------------------------------------
+router bgp {{ bgp.local_as }}
+ bgp router-id {{ bgp.router_id }}
+ bgp log-neighbor-changes
+ ! Refuse to advertise or accept anything not explicitly permitted. The default
+ ! in older IOS was the opposite, and that default has caused real outages.
+ no bgp default ipv4-unicast
+ bgp graceful-restart
+ timers bgp 10 30
+{% for peer in bgp.peers %}
+ neighbor {{ peer.address }} remote-as {{ peer.remote_as }}
+ neighbor {{ peer.address }} description {{ peer.description }}
+ neighbor {{ peer.address }} password 7 {{ peer.password_encrypted }}
+ neighbor {{ peer.address }} fall-over bfd
+{% if peer.ebgp_multihop is defined %}
+ neighbor {{ peer.address }} ebgp-multihop {{ peer.ebgp_multihop }}
+{% endif %}
+{% endfor %}
+ !
+ address-family ipv4 unicast
+{% for network in bgp.advertised_networks %}
+  network {{ network.prefix }} mask {{ network.mask }}
+{% endfor %}
+{% for peer in bgp.peers %}
+  neighbor {{ peer.address }} activate
+  neighbor {{ peer.address }} send-community
+  neighbor {{ peer.address }} soft-reconfiguration inbound
+  neighbor {{ peer.address }} route-map {{ peer.route_map_in }} in
+  neighbor {{ peer.address }} route-map {{ peer.route_map_out }} out
+  ! A prefix limit turns a misconfigured or compromised peer into a dropped
+  ! session instead of an exhausted routing table.
+  neighbor {{ peer.address }} maximum-prefix {{ peer.max_prefix | default(1000) }} 80 restart 15
+{% endfor %}
+ exit-address-family
+!
+! --- Quality of service ----------------------------------------------------
+{% include 'partials/qos.j2' %}
+!
+! --- Control plane policing ------------------------------------------------
+{% include 'partials/control-plane.j2' %}
+!
+! --- Access lists ----------------------------------------------------------
+{% include 'partials/management-acl.j2' %}
+!
+! --- Line configuration ----------------------------------------------------
+line con 0
+ exec-timeout 15 0
+ logging synchronous
+ login authentication default
+line vty 0 15
+ exec-timeout 15 0
+ logging synchronous
+ access-class {{ snmp.acl_name }} in vrf-also
+ transport input ssh
+ transport output ssh
+ login authentication default
+!
+banner login ^
+{{ banner_text }}
+^
+!
+! --- Housekeeping ----------------------------------------------------------
+no ip http server
+no ip http secure-server
+no ip source-route
+no ip bootp server
+no ip domain-lookup
+no service config
+no cdp run
+lldp run
+!
+! Archive configuration to the management server on every write, so a rollback
+! point exists without anyone remembering to create one.
+archive
+ path {{ config_archive.path }}
+ write-memory
+ time-period 1440
+!
+end
