@@ -1,0 +1,209 @@
+{#- ===========================================================================
+    Cisco ASA 5555-X / Firepower — perimeter and inter-segment firewall.
+
+    Active/standby pair. This device is where the segmentation policy is
+    actually enforced: the switch ACLs are defence in depth, this is the policy.
+    =========================================================================== -#}
+: ===========================================================================
+: {{ hostname }} — ASA firewall, {{ site.name }}
+: Generated from cisco/templates/firewall-asa.j2 — DO NOT EDIT ON THE DEVICE
+: ===========================================================================
+
+hostname {{ hostname }}
+domain-name {{ site.domain }}
+enable password {{ enable_secret_hash }} pbkdf2
+!
+! --- Interfaces and security levels ----------------------------------------
+{% for intf in interfaces %}
+interface {{ intf.hardware_id }}
+ nameif {{ intf.nameif }}
+ security-level {{ intf.security_level }}
+ ip address {{ intf.ip }} {{ intf.mask }}{% if intf.standby_ip is defined %} standby {{ intf.standby_ip }}{% endif %}
+
+{% if intf.description is defined %}
+ description {{ intf.description }}
+{% endif %}
+ no shutdown
+!
+{% endfor %}
+!
+! --- Failover --------------------------------------------------------------
+failover
+failover lan unit {{ failover.unit }}
+failover lan interface FAILOVER {{ failover.lan_interface }}
+failover link STATE {{ failover.state_interface }}
+failover interface ip FAILOVER {{ failover.lan_ip }} {{ failover.lan_mask }} standby {{ failover.lan_standby_ip }}
+failover interface ip STATE {{ failover.state_ip }} {{ failover.state_mask }} standby {{ failover.state_standby_ip }}
+failover key {{ failover.key_encrypted }}
+failover replication http
+! Poll fast enough that a failover is quicker than an application timeout, slow
+! enough that a momentary blip does not cause one.
+failover polltime unit msec 500 holdtime 3
+failover polltime interface 5 holdtime 25
+!
+! --- Object groups ---------------------------------------------------------
+{% for grp in object_groups.networks %}
+object-group network {{ grp.name }}
+ description {{ grp.description }}
+{% for member in grp.members %}
+ network-object {{ member }}
+{% endfor %}
+!
+{% endfor %}
+{% for grp in object_groups.services %}
+object-group service {{ grp.name }} {{ grp.protocol }}
+ description {{ grp.description }}
+{% for port in grp.ports %}
+ port-object eq {{ port }}
+{% endfor %}
+!
+{% endfor %}
+!
+! --- Policy: outside -------------------------------------------------------
+! Default deny. Only the published services are reachable from outside, and only
+! at the load balancer VIP — never at a server address.
+access-list OUTSIDE_IN extended permit tcp any object-group PLATFORM_VIP object-group SVC_WEB
+access-list OUTSIDE_IN extended permit icmp any object-group PLATFORM_VIP echo-reply
+access-list OUTSIDE_IN extended permit icmp any any unreachable
+access-list OUTSIDE_IN extended permit icmp any any time-exceeded
+access-list OUTSIDE_IN extended deny ip any any log
+!
+! --- Policy: user segment to the platform ----------------------------------
+access-list USERS_IN extended permit tcp object-group USER_NETWORKS object-group PLATFORM_VIP object-group SVC_WEB
+access-list USERS_IN extended permit udp object-group USER_NETWORKS object-group INFRA_SERVICES eq domain
+access-list USERS_IN extended permit udp object-group USER_NETWORKS object-group INFRA_SERVICES eq ntp
+access-list USERS_IN extended deny ip object-group USER_NETWORKS object-group DATABASE_SEGMENT log
+access-list USERS_IN extended deny ip object-group USER_NETWORKS object-group MANAGEMENT_SEGMENT log
+access-list USERS_IN extended permit ip object-group USER_NETWORKS any
+!
+! --- Policy: application segment -------------------------------------------
+! The application tier reaches the database on one port and nothing else. This
+! is the rule that limits the blast radius of an application compromise, so it
+! is written explicitly rather than inherited from a security-level comparison.
+access-list APP_IN extended permit tcp object-group APPLICATION_SEGMENT object-group DATABASE_SEGMENT eq 5432
+access-list APP_IN extended permit tcp object-group APPLICATION_SEGMENT object-group INFRA_SERVICES eq 636
+access-list APP_IN extended permit udp object-group APPLICATION_SEGMENT object-group INFRA_SERVICES eq domain
+access-list APP_IN extended permit udp object-group APPLICATION_SEGMENT object-group INFRA_SERVICES eq ntp
+access-list APP_IN extended permit tcp object-group APPLICATION_SEGMENT object-group INTEGRATION_PARTNERS eq https
+access-list APP_IN extended deny ip object-group APPLICATION_SEGMENT object-group USER_NETWORKS log
+access-list APP_IN extended deny ip any any log
+!
+! --- Policy: database segment ----------------------------------------------
+! The database initiates almost nothing. Anything it does initiate is listed
+! here, and an entry that nobody can explain is a finding.
+access-list DB_IN extended permit tcp object-group DATABASE_SEGMENT object-group DATABASE_SEGMENT eq 5432
+access-list DB_IN extended permit tcp object-group DATABASE_SEGMENT object-group DR_DATABASE eq 5432
+access-list DB_IN extended permit udp object-group DATABASE_SEGMENT object-group INFRA_SERVICES eq ntp
+access-list DB_IN extended permit udp object-group DATABASE_SEGMENT object-group INFRA_SERVICES eq domain
+access-list DB_IN extended permit tcp object-group DATABASE_SEGMENT object-group SYSLOG_COLLECTORS eq 601
+access-list DB_IN extended deny ip any any log
+!
+! --- Policy: management segment --------------------------------------------
+access-list MGMT_IN extended permit tcp object-group MANAGEMENT_SEGMENT any eq ssh
+access-list MGMT_IN extended permit udp object-group MANAGEMENT_SEGMENT any eq snmp
+access-list MGMT_IN extended permit tcp object-group MANAGEMENT_SEGMENT any object-group SVC_MONITORING
+access-list MGMT_IN extended permit icmp object-group MANAGEMENT_SEGMENT any
+access-list MGMT_IN extended deny ip any any log
+!
+access-group OUTSIDE_IN in interface outside
+access-group USERS_IN in interface users
+access-group APP_IN in interface application
+access-group DB_IN in interface database
+access-group MGMT_IN in interface management
+!
+! --- NAT -------------------------------------------------------------------
+{% for nat in nat_rules %}
+object network {{ nat.name }}
+ {{ nat.definition }}
+ nat ({{ nat.real_interface }},{{ nat.mapped_interface }}) {{ nat.type }} {{ nat.mapped }}
+!
+{% endfor %}
+!
+! --- Inspection ------------------------------------------------------------
+policy-map global_policy
+ class inspection_default
+  inspect dns preset_dns_map
+  inspect ftp
+  inspect icmp
+  inspect icmp error
+  inspect tftp
+  ! SQL*Net and similar inspections are deliberately NOT enabled: they rewrite
+  ! traffic in ways that break modern drivers and their security value here is
+  ! negligible, since the database traffic is TLS-encrypted anyway.
+ class class-default
+  user-statistics accounting
+!
+! --- Threat detection ------------------------------------------------------
+threat-detection basic-threat
+threat-detection statistics access-list
+threat-detection statistics port
+threat-detection statistics protocol
+threat-detection statistics host number-of-rate 2
+!
+! --- Management ------------------------------------------------------------
+aaa-server TACACS_SERVERS protocol tacacs+
+{% for server in aaa.tacacs_servers %}
+aaa-server TACACS_SERVERS (management) host {{ server.address }}
+ key {{ server.key_encrypted }}
+!
+{% endfor %}
+aaa authentication ssh console TACACS_SERVERS LOCAL
+aaa authentication enable console TACACS_SERVERS LOCAL
+aaa authorization command TACACS_SERVERS LOCAL
+aaa accounting command TACACS_SERVERS
+aaa accounting ssh console TACACS_SERVERS
+!
+username {{ local_admin.username }} password {{ local_admin.secret_hash }} pbkdf2 privilege 15
+!
+{% for net in management_networks %}
+ssh {{ net.address }} {{ net.mask }} management
+{% endfor %}
+ssh version 2
+ssh cipher encryption high
+ssh cipher integrity high
+ssh key-exchange group dh-group14-sha256
+ssh timeout 15
+!
+no http server enable
+!
+! --- Logging ---------------------------------------------------------------
+logging enable
+logging timestamp
+logging buffer-size 1048576
+logging buffered informational
+logging trap informational
+{% for collector in syslog.collectors %}
+logging host management {{ collector }} 6/601
+{% endfor %}
+logging device-id hostname
+logging permit-hostdown
+! Deny messages are the ones that matter for a segmentation review, so they are
+! never rate-limited away.
+no logging message 106023
+!
+! --- SNMP ------------------------------------------------------------------
+{% for user in snmp.users %}
+snmp-server user {{ user.name }} {{ snmp.group }} v3 auth sha {{ user.auth_key }} priv aes 256 {{ user.priv_key }}
+{% endfor %}
+snmp-server group {{ snmp.group }} v3 priv
+snmp-server host management {{ snmp.trap_receiver }} version 3 {{ snmp.users[0].name }}
+snmp-server location {{ site.location_string }}
+snmp-server contact {{ site.contact }}
+snmp-server enable traps snmp authentication linkup linkdown coldstart
+snmp-server enable traps entity config-change
+snmp-server enable traps ipsec start stop
+!
+! --- NTP -------------------------------------------------------------------
+ntp authenticate
+{% for key in ntp.authentication_keys %}
+ntp authentication-key {{ key.id }} md5 {{ key.value_encrypted }}
+{% endfor %}
+ntp trusted-key {{ ntp.authentication_keys | map(attribute='id') | join(' ') }}
+{% for server in ntp.servers %}
+ntp server {{ server.address }} key {{ server.key_id }}{% if server.prefer | default(false) %} prefer{% endif %}
+
+{% endfor %}
+!
+banner motd {{ banner_text }}
+!
+: end

@@ -1,0 +1,291 @@
+{#- ===========================================================================
+    Cisco ISR 4451 / Catalyst 8300 WAN edge router.
+
+    Two providers, BGP for path control, IPsec over both for the inter-site
+    link, and QoS that assumes the WAN is the scarce resource — because it is.
+    =========================================================================== -#}
+! ===========================================================================
+! {{ hostname }} — WAN edge router, {{ site.name }}
+! Generated from cisco/templates/wan-router.j2 — DO NOT EDIT ON THE DEVICE
+! ===========================================================================
+
+version 17.9
+service timestamps debug datetime msec localtime show-timezone
+service timestamps log datetime msec localtime show-timezone
+service password-encryption
+!
+hostname {{ hostname }}
+!
+{% include 'partials/aaa.j2' %}
+!
+{% include 'partials/management.j2' %}
+!
+{% include 'partials/logging-snmp.j2' %}
+!
+! --- IPsec: inter-site tunnels ---------------------------------------------
+! Modern proposals only. The older suites are still accepted by IOS defaults and
+! still negotiated by anything that offers them, so they are removed explicitly.
+crypto ikev2 proposal IKEV2-PROPOSAL
+ encryption aes-gcm-256
+ prf sha512 sha384
+ group 20 19
+!
+crypto ikev2 policy IKEV2-POLICY
+ proposal IKEV2-PROPOSAL
+!
+crypto ikev2 keyring IKEV2-KEYRING
+{% for tunnel in tunnels %}
+ peer {{ tunnel.peer_name }}
+  address {{ tunnel.peer_address }}
+  pre-shared-key local {{ tunnel.psk_local_encrypted }}
+  pre-shared-key remote {{ tunnel.psk_remote_encrypted }}
+{% endfor %}
+!
+crypto ikev2 profile IKEV2-PROFILE
+ match identity remote address {{ tunnels[0].peer_address }} 255.255.255.255
+{% for tunnel in tunnels[1:] %}
+ match identity remote address {{ tunnel.peer_address }} 255.255.255.255
+{% endfor %}
+ identity local address {{ tunnels[0].local_address }}
+ authentication local pre-share
+ authentication remote pre-share
+ keyring local IKEV2-KEYRING
+ dpd 10 3 periodic
+!
+crypto ipsec transform-set TS-AES-GCM esp-gcm 256
+ mode tunnel
+!
+crypto ipsec profile IPSEC-PROFILE
+ set transform-set TS-AES-GCM
+ set ikev2-profile IKEV2-PROFILE
+ set pfs group20
+ set security-association lifetime seconds 3600
+!
+! --- WAN interfaces --------------------------------------------------------
+{% for wan in wan_interfaces %}
+interface {{ wan.interface }}
+ description {{ wan.provider }} — {{ wan.circuit_id }} ({{ wan.bandwidth_mbps }} Mbps)
+ bandwidth {{ wan.bandwidth_mbps * 1000 }}
+ ip address {{ wan.ip }} {{ wan.mask }}
+ ! An inbound filter on a provider-facing interface is not optional.
+ ip access-group WAN_INBOUND in
+ ip verify unicast source reachable-via rx
+ no ip redirects
+ no ip unreachables
+ no ip proxy-arp
+ ip nbar protocol-discovery
+ service-policy output WAN-EGRESS-{{ wan.bandwidth_mbps }}M
+ load-interval 30
+ no shutdown
+!
+{% endfor %}
+!
+! --- Tunnels ---------------------------------------------------------------
+{% for tunnel in tunnels %}
+interface Tunnel{{ tunnel.id }}
+ description IPsec to {{ tunnel.peer_site }} via {{ tunnel.provider }}
+ ip address {{ tunnel.ip }} {{ tunnel.mask }}
+ ! 1400 accounts for the IPsec overhead. Getting this wrong produces the
+ ! classic symptom: pings work, large transfers hang.
+ ip mtu 1400
+ ip tcp adjust-mss 1360
+ tunnel source {{ tunnel.source_interface }}
+ tunnel mode ipsec ipv4
+ tunnel destination {{ tunnel.peer_address }}
+ tunnel protection ipsec profile IPSEC-PROFILE
+ ip ospf {{ ospf.process_id }} area {{ tunnel.ospf_area }}
+ ip ospf network point-to-point
+ ip ospf cost {{ tunnel.ospf_cost }}
+ keepalive 5 3
+ no shutdown
+!
+{% endfor %}
+!
+! --- LAN-facing ------------------------------------------------------------
+{% for lan in lan_interfaces %}
+interface {{ lan.interface }}
+ description {{ lan.description }}
+ ip address {{ lan.ip }} {{ lan.mask }}
+ ip ospf {{ ospf.process_id }} area {{ lan.ospf_area }}
+ ip ospf bfd
+ bfd interval 300 min_rx 300 multiplier 3
+ load-interval 30
+ no shutdown
+!
+{% endfor %}
+!
+! --- Routing: BGP ----------------------------------------------------------
+router bgp {{ bgp.local_as }}
+ bgp router-id {{ bgp.router_id }}
+ bgp log-neighbor-changes
+ no bgp default ipv4-unicast
+ bgp bestpath as-path multipath-relax
+ bgp graceful-restart
+ timers bgp 10 30
+{% for peer in bgp.peers %}
+ neighbor {{ peer.address }} remote-as {{ peer.remote_as }}
+ neighbor {{ peer.address }} description {{ peer.description }}
+ neighbor {{ peer.address }} password 7 {{ peer.password_encrypted }}
+{% if peer.type == 'provider' %}
+ neighbor {{ peer.address }} ttl-security hops 1
+{% endif %}
+{% endfor %}
+ !
+ address-family ipv4 unicast
+{% for network in bgp.advertised_networks %}
+  network {{ network.prefix }} mask {{ network.mask }}
+{% endfor %}
+{% for peer in bgp.peers %}
+  neighbor {{ peer.address }} activate
+  neighbor {{ peer.address }} send-community both
+  neighbor {{ peer.address }} soft-reconfiguration inbound
+  neighbor {{ peer.address }} route-map {{ peer.route_map_in }} in
+  neighbor {{ peer.address }} route-map {{ peer.route_map_out }} out
+  neighbor {{ peer.address }} maximum-prefix {{ peer.max_prefix }} 85 restart 30
+{% endfor %}
+  maximum-paths 2
+ exit-address-family
+!
+! --- Routing: OSPF (internal) ----------------------------------------------
+router ospf {{ ospf.process_id }}
+ router-id {{ ospf.router_id }}
+ area 0 authentication message-digest
+ passive-interface default
+{% for lan in lan_interfaces %}
+ no passive-interface {{ lan.interface }}
+{% endfor %}
+{% for tunnel in tunnels %}
+ no passive-interface Tunnel{{ tunnel.id }}
+{% endfor %}
+ ! Default originated only while a provider session is up — advertising a
+ ! default route the router cannot honour creates a black hole.
+ default-information originate route-map ORIGINATE-DEFAULT-IF-WAN-UP
+ log-adjacency-changes detail
+ bfd all-interfaces
+!
+! --- Path preference -------------------------------------------------------
+! Primary provider is preferred by local preference inbound and AS-path
+! prepending outbound. Written as route maps rather than as static weights so
+! that the intent is visible in the configuration.
+route-map RM-PRIMARY-IN permit 10
+ description Prefer the primary provider for inbound traffic
+ set local-preference 200
+!
+route-map RM-SECONDARY-IN permit 10
+ description Secondary provider — used when the primary is down
+ set local-preference 100
+!
+route-map RM-PRIMARY-OUT permit 10
+ description Advertise our prefixes normally to the primary
+ match ip address prefix-list PL-OUR-PREFIXES
+!
+route-map RM-SECONDARY-OUT permit 10
+ description Prepend so the internet prefers the primary path back to us
+ match ip address prefix-list PL-OUR-PREFIXES
+ set as-path prepend {{ bgp.local_as }} {{ bgp.local_as }}
+!
+route-map ORIGINATE-DEFAULT-IF-WAN-UP permit 10
+ match ip address prefix-list PL-DEFAULT
+ match track {{ wan_track_object }}
+!
+ip prefix-list PL-OUR-PREFIXES seq 5 permit {{ bgp.advertised_networks[0].prefix }}/{{ bgp.advertised_networks[0].prefix_length }}
+{% for net in bgp.advertised_networks[1:] %}
+ip prefix-list PL-OUR-PREFIXES seq {{ 5 + (loop.index * 5) }} permit {{ net.prefix }}/{{ net.prefix_length }}
+{% endfor %}
+ip prefix-list PL-DEFAULT seq 5 permit 0.0.0.0/0
+!
+track {{ wan_track_object }} interface {{ wan_interfaces[0].interface }} line-protocol
+!
+! --- Inbound filter on the provider-facing interfaces ----------------------
+ip access-list extended WAN_INBOUND
+ remark Deny our own address space arriving from outside — that is a spoof
+{% for net in bgp.advertised_networks %}
+ deny   ip {{ net.prefix }} {{ net.wildcard }} any log-input
+{% endfor %}
+ remark Deny RFC1918 and other bogons from the internet
+ deny   ip 10.0.0.0 0.255.255.255 any
+ deny   ip 172.16.0.0 0.15.255.255 any
+ deny   ip 192.168.0.0 0.0.255.255 any
+ deny   ip 127.0.0.0 0.255.255.255 any
+ deny   ip 169.254.0.0 0.0.255.255 any
+ deny   ip 224.0.0.0 15.255.255.255 any
+ deny   ip host 0.0.0.0 any
+ remark Permit the established sessions and the services we actually offer
+ permit tcp any any established
+{% for peer in bgp.peers if peer.type == 'provider' %}
+ permit tcp host {{ peer.address }} host {{ wan_interfaces[loop.index0].ip }} eq bgp
+ permit tcp host {{ peer.address }} eq bgp host {{ wan_interfaces[loop.index0].ip }}
+{% endfor %}
+ permit esp any any
+ permit udp any any eq isakmp
+ permit udp any any eq non500-isakmp
+ remark ICMP we need for path MTU discovery and diagnosis; the rest is noise
+ permit icmp any any echo-reply
+ permit icmp any any unreachable
+ permit icmp any any time-exceeded
+ permit icmp any any packet-too-big
+ deny   ip any any log-input
+!
+{% include 'partials/qos-wan.j2' %}
+!
+{% include 'partials/control-plane.j2' %}
+!
+{% include 'partials/management-acl.j2' %}
+!
+! --- Flow export -----------------------------------------------------------
+flow record FR-IPV4
+ match ipv4 source address
+ match ipv4 destination address
+ match ipv4 protocol
+ match transport source-port
+ match transport destination-port
+ match ipv4 tos
+ match interface input
+ collect interface output
+ collect counter bytes long
+ collect counter packets long
+ collect timestamp sys-uptime first
+ collect timestamp sys-uptime last
+ collect application name
+!
+flow exporter FE-COLLECTOR
+ destination {{ netflow.collector }}
+ source {{ mgmt_interface }}
+ transport udp {{ netflow.port }}
+ template data timeout 60
+ option interface-table timeout 60
+ option application-table timeout 60
+!
+flow monitor FM-IPV4
+ exporter FE-COLLECTOR
+ cache timeout active 60
+ cache timeout inactive 15
+ record FR-IPV4
+!
+{% for wan in wan_interfaces %}
+interface {{ wan.interface }}
+ ip flow monitor FM-IPV4 input
+ ip flow monitor FM-IPV4 output
+!
+{% endfor %}
+!
+line con 0
+ exec-timeout 15 0
+ logging synchronous
+line vty 0 15
+ exec-timeout 15 0
+ access-class {{ snmp.acl_name }} in vrf-also
+ transport input ssh
+!
+banner login ^
+{{ banner_text }}
+^
+!
+no ip http server
+no ip http secure-server
+no ip source-route
+no ip bootp server
+no cdp run
+lldp run
+!
+end

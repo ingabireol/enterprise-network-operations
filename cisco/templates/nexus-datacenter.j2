@@ -1,0 +1,264 @@
+{#- ===========================================================================
+    Cisco Nexus 9300 data centre switch — vPC pair.
+
+    This is the switch the application and database servers connect to, so its
+    two priorities are: never blackhole a server during a failure, and never let
+    the application segment reach the database segment except through the
+    firewall.
+    =========================================================================== -#}
+! ===========================================================================
+! {{ hostname }} — Nexus 9300, {{ site.name }} data centre
+! Generated from cisco/templates/nexus-datacenter.j2 — DO NOT EDIT ON THE DEVICE
+! ===========================================================================
+
+version 10.3(4a)
+hostname {{ hostname }}
+!
+feature lacp
+feature vpc
+feature interface-vlan
+feature hsrp
+feature ospf
+feature bfd
+feature lldp
+feature scp-server
+feature sflow
+no feature telnet
+!
+! --- Management ------------------------------------------------------------
+vrf context management
+  ip route 0.0.0.0/0 {{ mgmt_gateway }}
+!
+interface mgmt0
+  description Out-of-band management
+  vrf member management
+  ip address {{ mgmt_ip }}/{{ mgmt_prefix_len }}
+  no shutdown
+!
+ip domain-name {{ site.domain }}
+ip name-server {{ dns_servers | join(' ') }} use-vrf management
+!
+! --- AAA -------------------------------------------------------------------
+feature tacacs+
+{% for server in aaa.tacacs_servers %}
+tacacs-server host {{ server.address }} key 7 "{{ server.key_encrypted }}"
+{% endfor %}
+aaa group server tacacs+ TACACS_SERVERS
+{% for server in aaa.tacacs_servers %}
+  server {{ server.address }}
+{% endfor %}
+  use-vrf management
+  source-interface mgmt0
+!
+aaa authentication login default group TACACS_SERVERS local
+aaa authentication login error-enable
+aaa accounting default group TACACS_SERVERS
+!
+username {{ local_admin.username }} password 5 {{ local_admin.secret_hash }} role network-admin
+!
+! --- SSH -------------------------------------------------------------------
+ssh key rsa 2048 force
+ssh login-attempts 3
+line vty
+  exec-timeout 15
+  access-class {{ snmp.acl_name }} in
+!
+! --- Time ------------------------------------------------------------------
+clock timezone {{ site.timezone_name }} {{ site.timezone_offset }} 0
+ntp authenticate
+{% for key in ntp.authentication_keys %}
+ntp authentication-key {{ key.id }} md5 {{ key.value_encrypted }} 7
+{% endfor %}
+ntp trusted-key {{ ntp.authentication_keys | map(attribute='id') | join(' ') }}
+{% for server in ntp.servers %}
+ntp server {{ server.address }} key {{ server.key_id }} use-vrf management{% if server.prefer | default(false) %} prefer{% endif %}
+
+{% endfor %}
+ntp source-interface mgmt0
+!
+! --- Logging ---------------------------------------------------------------
+logging level all 6
+{% for collector in syslog.collectors %}
+logging server {{ collector }} 6 use-vrf management facility local7
+{% endfor %}
+logging source-interface mgmt0
+logging timestamp milliseconds
+logging logfile messages 6 size 4194304
+!
+! --- SNMPv3 ----------------------------------------------------------------
+{% for user in snmp.users %}
+snmp-server user {{ user.name }} network-operator auth sha {{ user.auth_key }} priv aes-128 {{ user.priv_key }}
+{% endfor %}
+snmp-server host {{ snmp.trap_receiver }} version 3 priv {{ snmp.users[0].name }}
+snmp-server host {{ snmp.trap_receiver }} use-vrf management
+snmp-server location {{ site.location_string }}
+snmp-server contact {{ site.contact }}
+snmp-server enable traps link
+snmp-server enable traps vtp
+snmp-server enable traps entity
+snmp-server enable traps vpc
+no snmp-server enable traps entity entity_mib_change
+!
+! --- VLANs -----------------------------------------------------------------
+{% for vlan in vlans %}
+vlan {{ vlan.id }}
+  name {{ vlan.name }}
+{% endfor %}
+!
+! --- Spanning tree ---------------------------------------------------------
+spanning-tree mode rapid-pvst
+spanning-tree vlan {{ vlans | map(attribute='id') | join(',') }} priority {{ stp.priority }}
+spanning-tree port type edge bpduguard default
+spanning-tree port type network default
+spanning-tree loopguard default
+!
+! --- vPC -------------------------------------------------------------------
+! Two switches presenting themselves as one to every downstream server, so a
+! server's bonded pair stays up when a switch is lost or rebooted for patching.
+vpc domain {{ vpc.domain_id }}
+  role priority {{ vpc.role_priority }}
+  system-priority 4000
+  ! Keepalive over the management network, deliberately separate from the peer
+  ! link: if both fail together, the two switches cannot tell a peer failure
+  ! from a link failure, which is how a split brain starts.
+  peer-keepalive destination {{ vpc.peer_keepalive_dest }} source {{ vpc.peer_keepalive_src }} vrf management
+  peer-gateway
+  ip arp synchronize
+  ipv6 nd synchronize
+  ! Bring the peer link up first and wait for the routing protocol to converge
+  ! before restoring vPC member ports — otherwise a rebooted switch forwards
+  ! into a network it does not yet have routes for.
+  delay restore 150
+  auto-recovery reload-delay 360
+  peer-switch
+!
+interface port-channel{{ vpc.peer_link_po }}
+  description vPC peer link to {{ vpc.peer_hostname }}
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan {{ vpc.peer_link_vlans }}
+  spanning-tree port type network
+  vpc peer-link
+!
+{% for member in vpc.peer_link_members %}
+interface {{ member }}
+  description vPC peer link member to {{ vpc.peer_hostname }}
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan {{ vpc.peer_link_vlans }}
+  channel-group {{ vpc.peer_link_po }} mode active
+  no shutdown
+!
+{% endfor %}
+!
+! --- SVIs and HSRP ---------------------------------------------------------
+{% for vlan in vlans if vlan.svi is defined %}
+interface Vlan{{ vlan.id }}
+  description {{ vlan.name }} — gateway
+  no shutdown
+  no ip redirects
+  ip address {{ vlan.svi.ip }}/{{ vlan.svi.prefix_len }}
+{% if vlan.svi.acl_in is defined %}
+  ip access-group {{ vlan.svi.acl_in }} in
+{% endif %}
+  ip ospf passive-interface
+  ip router ospf {{ ospf.process_id }} area {{ vlan.svi.ospf_area | default('0.0.0.0') }}
+  hsrp version 2
+  hsrp {{ vlan.svi.hsrp.group }}
+    preempt delay minimum 180
+    priority {{ vlan.svi.hsrp.priority }}
+    timers msec 250 msec 750
+    authentication md5 key-string 7 {{ vlan.svi.hsrp.key_encrypted }}
+    ip {{ vlan.svi.hsrp.vip }}
+!
+{% endfor %}
+!
+! --- Server-facing vPC port channels ---------------------------------------
+{% for srv in server_ports %}
+interface port-channel{{ srv.po_id }}
+  description {{ srv.description }}
+  switchport
+  switchport mode {{ srv.mode }}
+{% if srv.mode == 'access' %}
+  switchport access vlan {{ srv.vlan }}
+{% else %}
+  switchport trunk allowed vlan {{ srv.allowed_vlans }}
+{% endif %}
+  spanning-tree port type edge{% if srv.mode == 'trunk' %} trunk{% endif %}
+
+  spanning-tree bpduguard enable
+  vpc {{ srv.po_id }}
+  no shutdown
+!
+{% for member in srv.members %}
+interface {{ member }}
+  description {{ srv.description }} — member
+  switchport
+  switchport mode {{ srv.mode }}
+{% if srv.mode == 'access' %}
+  switchport access vlan {{ srv.vlan }}
+{% else %}
+  switchport trunk allowed vlan {{ srv.allowed_vlans }}
+{% endif %}
+  channel-group {{ srv.po_id }} mode active
+  no shutdown
+!
+{% endfor %}
+{% endfor %}
+!
+! --- Uplinks to the core ---------------------------------------------------
+{% for uplink in uplinks %}
+interface {{ uplink.interface }}
+  description {{ uplink.description }}
+  no switchport
+  ip address {{ uplink.ip }}/{{ uplink.prefix_len }}
+  ip ospf network point-to-point
+  ip router ospf {{ ospf.process_id }} area {{ uplink.ospf_area }}
+  ip ospf bfd
+  no shutdown
+!
+{% endfor %}
+!
+! --- Segmentation enforcement ----------------------------------------------
+! The database segment is reachable from the application segment and from the
+! backup host, and from nothing else. This list is a defence in depth behind the
+! firewall policy, not a replacement for it — but it is the one that survives a
+! firewall misconfiguration.
+ip access-list ACL-DATABASE-IN
+  10 remark Application tier to PostgreSQL
+{% for net in segmentation.application_networks %}
+  {{ 10 + (loop.index * 10) }} permit tcp {{ net }} {{ segmentation.database_network }} eq 5432
+{% endfor %}
+  100 remark Backup host
+  110 permit tcp {{ segmentation.backup_host }}/32 {{ segmentation.database_network }} eq 5432
+  120 remark Database peer replication
+  130 permit tcp {{ segmentation.database_network }} {{ segmentation.database_network }} eq 5432
+  140 remark Monitoring
+  150 permit tcp {{ segmentation.monitoring_host }}/32 {{ segmentation.database_network }} eq 9187
+  160 remark Management
+  170 permit tcp {{ segmentation.management_network }} {{ segmentation.database_network }} eq 22
+  900 remark Everything else is logged and dropped
+  910 deny ip any any log
+!
+! --- Routing ---------------------------------------------------------------
+router ospf {{ ospf.process_id }}
+  router-id {{ ospf.router_id }}
+  area 0.0.0.0 authentication message-digest
+  passive-interface default
+  log-adjacency-changes detail
+  bfd
+  timers throttle spf 50 200 5000
+!
+! --- Flow sampling ---------------------------------------------------------
+sflow agent-ip {{ mgmt_ip }}
+sflow collector-ip {{ netflow.collector }} vrf management
+sflow collector-port {{ netflow.sflow_port }}
+sflow sampling-rate 4096
+sflow counter-poll-interval 30
+{% for uplink in uplinks %}
+sflow data-source interface {{ uplink.interface }}
+{% endfor %}
+!
+banner motd #
+{{ banner_text }}
+#
