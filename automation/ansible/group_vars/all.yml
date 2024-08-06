@@ -1,0 +1,100 @@
+---
+# Variables shared by every device. Site-specific values are in the per-site
+# files; anything secret is in vault.yml and referenced through a vault_*
+# indirection so that this file stays readable in a pull request.
+
+ansible_connection: ansible.netcommon.network_cli
+ansible_user: "{{ lookup('env', 'NETOPS_USERNAME') }}"
+ansible_password: "{{ lookup('env', 'NETOPS_PASSWORD') }}"
+ansible_become: true
+ansible_become_method: enable
+ansible_become_password: "{{ lookup('env', 'NETOPS_ENABLE_SECRET') }}"
+
+# --- Management plane -------------------------------------------------------
+mgmt_vrf: MGMT
+mgmt_interface: GigabitEthernet0/0
+
+management_networks:
+  - { address: 10.30.1.0,  wildcard: 0.0.0.255, mask: 255.255.255.0, description: "Primary site management" }
+  - { address: 10.40.1.0,  wildcard: 0.0.0.255, mask: 255.255.255.0, description: "Secondary site management" }
+  - { address: 10.30.99.0, wildcard: 0.0.0.255, mask: 255.255.255.0, description: "Network operations jump hosts" }
+
+dns_servers: [10.30.1.10, 10.40.1.10]
+
+# --- AAA --------------------------------------------------------------------
+aaa:
+  tacacs_servers:
+    - { address: 10.30.1.15, key_encrypted: "{{ vault_tacacs_key }}" }
+    - { address: 10.40.1.15, key_encrypted: "{{ vault_tacacs_key }}" }
+
+local_admin:
+  username: netadmin
+  secret_hash: "{{ vault_local_admin_hash }}"
+
+# --- Time -------------------------------------------------------------------
+ntp:
+  authentication_keys:
+    - { id: 1, value_encrypted: "{{ vault_ntp_key_1 }}" }
+  servers:
+    - { address: 10.30.1.10, key_id: 1, prefer: true }
+    - { address: 10.40.1.10, key_id: 1 }
+
+# --- Logging and SNMP -------------------------------------------------------
+syslog:
+  collectors: [10.30.1.16, 10.40.1.16]
+
+snmp:
+  group: NETOPS_RO
+  acl_name: ACL-MGMT-ACCESS
+  trap_receiver: 10.30.1.16
+  users:
+    - name: netops-monitor
+      auth_key: "{{ vault_snmp_auth_key }}"
+      priv_key: "{{ vault_snmp_priv_key }}"
+
+# --- Flow export ------------------------------------------------------------
+netflow:
+  collector: 10.30.1.17
+  port: 2055
+  sflow_port: 6343
+
+# --- Spanning tree ----------------------------------------------------------
+stp:
+  native_vlan: 999
+  root_priority: 4096
+
+# --- Segmentation -----------------------------------------------------------
+# These are the addresses the segmentation access lists are built from. Keeping
+# them here means the policy in the templates cannot disagree with the addressing
+# plan in docs/design/.
+segmentation:
+  application_networks:
+    - 10.30.20.0/24
+    - 10.40.20.0/24
+  database_network: 10.30.30.0/24
+  dr_database_network: 10.40.30.0/24
+  backup_host: 10.30.50.11
+  monitoring_host: 10.30.40.11
+  management_network: 10.30.1.0/24
+
+platform_network:
+  address: 10.30.20.0
+  wildcard: 0.0.0.255
+
+replication:
+  primary_address: 10.30.30.11
+  replica_address: 10.40.30.11
+
+config_archive:
+  path: "scp://netops@10.30.1.18/configs/$h-"
+
+banner_text: |
+  ********************************************************************
+    Authorised use only.
+
+    This device is the property of the organisation and is provided for
+    authorised business use. All activity is monitored, logged and
+    subject to audit.
+
+    Disconnect now if you are not an authorised user.
+  ********************************************************************

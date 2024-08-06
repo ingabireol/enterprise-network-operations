@@ -1,0 +1,203 @@
+---
+# ===========================================================================
+# Device register.
+#
+# This is the authoritative list of managed network devices. It is consumed by
+# both the Ansible playbooks and the Python tooling, so there is one register
+# rather than two that drift apart.
+#
+# `make inventory` lists it; `netops.inventory --verify` reconciles it against
+# what is actually reachable, and reports the differences — which in every real
+# estate there are some of.
+#
+# Addresses are RFC1918 examples for a documented reference topology.
+# ===========================================================================
+
+devices:
+
+  # --- Primary site: core ------------------------------------------------
+  - hostname: core-dc1-01
+    address: 10.30.1.11
+    platform: iosxe
+    model: C9500-48Y4C
+    site: dc-primary
+    role: core
+    tags: [stackwise-virtual, critical]
+    enable_required: false
+
+  - hostname: core-dc1-02
+    address: 10.30.1.12
+    platform: iosxe
+    model: C9500-48Y4C
+    site: dc-primary
+    role: core
+    tags: [stackwise-virtual, critical]
+
+  # --- Primary site: data centre -----------------------------------------
+  - hostname: nex-dc1-01
+    address: 10.30.1.21
+    platform: nxos
+    model: N9K-C93180YC-FX
+    site: dc-primary
+    role: datacenter
+    tags: [vpc, critical]
+
+  - hostname: nex-dc1-02
+    address: 10.30.1.22
+    platform: nxos
+    model: N9K-C93180YC-FX
+    site: dc-primary
+    role: datacenter
+    tags: [vpc, critical]
+
+  # --- Primary site: access ----------------------------------------------
+  - hostname: acc-dc1-f1-01
+    address: 10.30.1.31
+    platform: iosxe
+    model: C9300-48P
+    site: dc-primary
+    role: access
+    tags: [poe, floor-1]
+
+  - hostname: acc-dc1-f2-01
+    address: 10.30.1.32
+    platform: iosxe
+    model: C9300-48P
+    site: dc-primary
+    role: access
+    tags: [poe, floor-2]
+
+  - hostname: acc-dc1-f3-01
+    address: 10.30.1.33
+    platform: iosxe
+    model: C9300-24P
+    site: dc-primary
+    role: access
+    tags: [poe, floor-3]
+
+  # --- Primary site: WAN and security ------------------------------------
+  - hostname: wan-dc1-01
+    address: 10.30.1.41
+    platform: iosxe
+    model: ISR4451-X
+    site: dc-primary
+    role: wan
+    tags: [critical, internet-facing]
+
+  - hostname: fw-dc1-01
+    address: 10.30.1.51
+    platform: asa
+    model: ASA5555-X
+    site: dc-primary
+    role: firewall
+    tags: [critical, ha-active]
+    enable_required: true
+
+  - hostname: fw-dc1-02
+    address: 10.30.1.52
+    platform: asa
+    model: ASA5555-X
+    site: dc-primary
+    role: firewall
+    tags: [critical, ha-standby]
+    enable_required: true
+
+  # --- Secondary site (also the disaster recovery site) ------------------
+  - hostname: core-dc2-01
+    address: 10.40.1.11
+    platform: iosxe
+    model: C9500-24Y4C
+    site: dc-secondary
+    role: core
+    tags: [critical, dr]
+
+  - hostname: nex-dc2-01
+    address: 10.40.1.21
+    platform: nxos
+    model: N9K-C93180YC-FX
+    site: dc-secondary
+    role: datacenter
+    tags: [critical, dr]
+
+  - hostname: acc-dc2-f1-01
+    address: 10.40.1.31
+    platform: iosxe
+    model: C9300-24P
+    site: dc-secondary
+    role: access
+    tags: [poe, dr]
+
+  - hostname: wan-dc2-01
+    address: 10.40.1.41
+    platform: iosxe
+    model: ISR4451-X
+    site: dc-secondary
+    role: wan
+    tags: [critical, internet-facing, dr]
+
+  - hostname: fw-dc2-01
+    address: 10.40.1.51
+    platform: asa
+    model: ASA5555-X
+    site: dc-secondary
+    role: firewall
+    tags: [critical, dr]
+    enable_required: true
+
+# Ansible group mapping, derived from the roles above.
+all:
+  children:
+    core:
+      hosts:
+        core-dc1-01: { ansible_host: 10.30.1.11 }
+        core-dc1-02: { ansible_host: 10.30.1.12 }
+        core-dc2-01: { ansible_host: 10.40.1.11 }
+      vars:
+        ansible_network_os: cisco.ios.ios
+    datacenter:
+      hosts:
+        nex-dc1-01: { ansible_host: 10.30.1.21 }
+        nex-dc1-02: { ansible_host: 10.30.1.22 }
+        nex-dc2-01: { ansible_host: 10.40.1.21 }
+      vars:
+        ansible_network_os: cisco.nxos.nxos
+    access:
+      hosts:
+        acc-dc1-f1-01: { ansible_host: 10.30.1.31 }
+        acc-dc1-f2-01: { ansible_host: 10.30.1.32 }
+        acc-dc1-f3-01: { ansible_host: 10.30.1.33 }
+        acc-dc2-f1-01: { ansible_host: 10.40.1.31 }
+      vars:
+        ansible_network_os: cisco.ios.ios
+    wan:
+      hosts:
+        wan-dc1-01: { ansible_host: 10.30.1.41 }
+        wan-dc2-01: { ansible_host: 10.40.1.41 }
+      vars:
+        ansible_network_os: cisco.ios.ios
+    firewall:
+      hosts:
+        fw-dc1-01: { ansible_host: 10.30.1.51 }
+        fw-dc1-02: { ansible_host: 10.30.1.52 }
+        fw-dc2-01: { ansible_host: 10.40.1.51 }
+      vars:
+        ansible_network_os: cisco.asa.asa
+    dc_primary:
+      hosts:
+        core-dc1-01:
+        core-dc1-02:
+        nex-dc1-01:
+        nex-dc1-02:
+        acc-dc1-f1-01:
+        acc-dc1-f2-01:
+        acc-dc1-f3-01:
+        wan-dc1-01:
+        fw-dc1-01:
+        fw-dc1-02:
+    dc_secondary:
+      hosts:
+        core-dc2-01:
+        nex-dc2-01:
+        acc-dc2-f1-01:
+        wan-dc2-01:
+        fw-dc2-01:

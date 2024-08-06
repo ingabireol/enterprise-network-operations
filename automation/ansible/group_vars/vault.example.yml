@@ -1,0 +1,18 @@
+---
+# Copy to vault.yml and encrypt:  ansible-vault encrypt group_vars/vault.yml
+# Never commit the decrypted file.
+#
+# The values here are the *type 7 encrypted* forms as they appear in a device
+# configuration, not the plaintext. Generate them on a device, or with an
+# offline type-7 encoder, and keep the plaintext only in the password manager.
+
+vault_tacacs_key: "CHANGE-ME"
+vault_local_admin_hash: "CHANGE-ME"
+vault_ntp_key_1: "CHANGE-ME"
+vault_snmp_auth_key: "CHANGE-ME"
+vault_snmp_priv_key: "CHANGE-ME"
+vault_hsrp_key: "CHANGE-ME"
+vault_bgp_password: "CHANGE-ME"
+vault_radius_key: "CHANGE-ME"
+vault_ipsec_psk: "CHANGE-ME"
+vault_failover_key: "CHANGE-ME"

@@ -1,0 +1,92 @@
+---
+hostname: wan-dc1-01
+role: wan
+site:
+  name: Primary data centre
+  domain: example.gov
+  timezone_name: CAT
+  timezone_offset: 2
+  location_string: "Primary data centre, rack A2"
+  contact: "network-ops@example.gov"
+  vtp_domain: EXAMPLE
+
+mgmt_ip: 10.30.1.41
+mgmt_mask: 255.255.255.0
+
+wan_interfaces:
+  - interface: GigabitEthernet0/0/0
+    provider: "Provider A"
+    circuit_id: "CKT-A-102938"
+    bandwidth_mbps: 500
+    ip: 198.51.100.2
+    mask: 255.255.255.252
+  - interface: GigabitEthernet0/0/1
+    provider: "Provider B"
+    circuit_id: "CKT-B-847362"
+    bandwidth_mbps: 200
+    ip: 198.51.100.6
+    mask: 255.255.255.252
+
+lan_interfaces:
+  - interface: GigabitEthernet0/0/2
+    description: "To core-dc1-01"
+    ip: 10.30.254.1
+    mask: 255.255.255.254
+    ospf_area: 0
+
+tunnels:
+  - id: 1
+    peer_name: wan-dc2-01-via-a
+    peer_site: "Secondary data centre"
+    provider: "Provider A"
+    peer_address: 198.51.100.10
+    local_address: 198.51.100.2
+    source_interface: GigabitEthernet0/0/0
+    ip: 10.30.253.1
+    mask: 255.255.255.252
+    ospf_area: 0
+    ospf_cost: 100
+    psk_local_encrypted: "{{ vault_ipsec_psk }}"
+    psk_remote_encrypted: "{{ vault_ipsec_psk }}"
+  - id: 2
+    peer_name: wan-dc2-01-via-b
+    peer_site: "Secondary data centre"
+    provider: "Provider B"
+    peer_address: 198.51.100.14
+    local_address: 198.51.100.6
+    source_interface: GigabitEthernet0/0/1
+    ip: 10.30.253.5
+    mask: 255.255.255.252
+    ospf_area: 0
+    ospf_cost: 200
+    psk_local_encrypted: "{{ vault_ipsec_psk }}"
+    psk_remote_encrypted: "{{ vault_ipsec_psk }}"
+
+wan_track_object: 10
+
+ospf:
+  process_id: 1
+  router_id: 10.30.255.41
+
+bgp:
+  local_as: 65001
+  router_id: 10.30.255.41
+  peers:
+    - address: 198.51.100.1
+      remote_as: 64512
+      type: provider
+      description: "Provider A — primary"
+      password_encrypted: "{{ vault_bgp_password }}"
+      route_map_in: RM-PRIMARY-IN
+      route_map_out: RM-PRIMARY-OUT
+      max_prefix: 1000
+    - address: 198.51.100.5
+      remote_as: 64513
+      type: provider
+      description: "Provider B — secondary"
+      password_encrypted: "{{ vault_bgp_password }}"
+      route_map_in: RM-SECONDARY-IN
+      route_map_out: RM-SECONDARY-OUT
+      max_prefix: 1000
+  advertised_networks:
+    - { prefix: 10.30.0.0, mask: 255.255.0.0, prefix_length: 16, wildcard: 0.0.255.255 }

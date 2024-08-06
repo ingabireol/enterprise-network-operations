@@ -1,0 +1,50 @@
+---
+hostname: acc-dc1-f1-01
+role: access
+closet: "Floor 1 comms room"
+site:
+  name: Primary data centre
+  domain: example.gov
+  timezone_name: CAT
+  timezone_offset: 2
+  location_string: "Floor 1 comms room, rack B2"
+  contact: "network-ops@example.gov"
+  vtp_domain: EXAMPLE
+
+mgmt_ip: 10.30.1.31
+mgmt_mask: 255.255.255.0
+
+vlans:
+  - { id: 1,   name: MANAGEMENT }
+  - { id: 10,  name: USER }
+  - { id: 11,  name: VOICE }
+  - { id: 12,  name: GUEST }
+  - { id: 999, name: PARKING }
+
+uplink:
+  core_hostname: core-dc1-01
+  allowed_vlans: "10,11,12,999"
+  members:
+    - TenGigabitEthernet1/1/1
+    - TenGigabitEthernet1/1/2
+
+access_port_ranges:
+  - interfaces: "GigabitEthernet1/0/1-36"
+    description: "User access"
+    data_vlan: 10
+    voice_vlan: 11
+    max_mac: 3
+
+unused_ports: "GigabitEthernet1/0/37-48"
+unused_vlan: 999
+
+dot1x:
+  enabled: true
+  critical_vlan: 10
+  guest_vlan: 12
+  radius_servers:
+    - { address: 10.30.1.19, key_encrypted: "{{ vault_radius_key }}" }
+    - { address: 10.40.1.19, key_encrypted: "{{ vault_radius_key }}" }
+
+dhcp_snooping:
+  vlans: "10,11,12"

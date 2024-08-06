@@ -1,0 +1,149 @@
+---
+# Device-specific variables for core-dc1-01. Everything shared lives in
+# group_vars/; only what genuinely differs between this device and its pair
+# belongs here.
+
+hostname: core-dc1-01
+role: core
+site:
+  name: Primary data centre
+  domain: example.gov
+  timezone_name: CAT
+  timezone_offset: 2
+  location_string: "Primary data centre, rack A1"
+  contact: "network-ops@example.gov"
+  vtp_domain: EXAMPLE
+
+mgmt_ip: 10.30.1.11
+mgmt_mask: 255.255.255.0
+
+# --- StackWise Virtual -------------------------------------------------------
+svl:
+  domain_id: 1
+  peer_hostname: core-dc1-02
+  links:
+    - FortyGigabitEthernet1/0/1
+    - FortyGigabitEthernet1/0/2
+  dual_active_links:
+    - TenGigabitEthernet1/0/48
+
+# --- VLANs -------------------------------------------------------------------
+vlans:
+  - id: 1
+    name: MANAGEMENT
+  - id: 10
+    name: USER
+    svi:
+      ip: 10.30.10.2
+      mask: 255.255.255.0
+      helper_addresses: [10.30.1.10]
+      ospf_area: 10
+      hsrp:
+        group: 10
+        vip: 10.30.10.1
+        priority: 110
+        key_encrypted: "{{ vault_hsrp_key }}"
+        track:
+          - { object: 1, decrement: 20 }
+  - id: 11
+    name: VOICE
+    svi:
+      ip: 10.30.11.2
+      mask: 255.255.255.0
+      helper_addresses: [10.30.1.10]
+      ospf_area: 10
+      hsrp:
+        group: 11
+        vip: 10.30.11.1
+        priority: 110
+        key_encrypted: "{{ vault_hsrp_key }}"
+  - id: 12
+    name: GUEST
+    svi:
+      ip: 10.30.12.2
+      mask: 255.255.255.0
+      helper_addresses: [10.30.1.10]
+      acl_in: ACL-GUEST-IN
+      ospf_area: 10
+      hsrp:
+        group: 12
+        vip: 10.30.12.1
+        priority: 110
+        key_encrypted: "{{ vault_hsrp_key }}"
+  - id: 20
+    name: APPLICATION
+    svi:
+      ip: 10.30.20.2
+      mask: 255.255.255.0
+      ospf_area: 0
+      hsrp:
+        group: 20
+        vip: 10.30.20.1
+        priority: 110
+        key_encrypted: "{{ vault_hsrp_key }}"
+  - id: 30
+    name: DATABASE
+    svi:
+      ip: 10.30.30.2
+      mask: 255.255.255.0
+      acl_in: ACL-DATABASE-IN
+      ospf_area: 0
+      hsrp:
+        group: 30
+        vip: 10.30.30.1
+        priority: 110
+        key_encrypted: "{{ vault_hsrp_key }}"
+  - id: 999
+    name: PARKING
+
+# --- Uplinks -----------------------------------------------------------------
+uplinks:
+  - interface: TenGigabitEthernet1/0/1
+    description: "Uplink to wan-dc1-01"
+    ip: 10.30.254.0
+    mask: 255.255.255.254
+    ospf_area: 0
+    ospf_cost: 10
+  - interface: TenGigabitEthernet1/0/2
+    description: "Uplink to nex-dc1-01"
+    ip: 10.30.254.4
+    mask: 255.255.255.254
+    ospf_area: 0
+    ospf_cost: 5
+
+# --- Downlinks ---------------------------------------------------------------
+downlinks:
+  - interface: Port-channel11
+    description: "Downlink to acc-dc1-f1-01"
+    allowed_vlans: "10,11,12,999"
+  - interface: Port-channel12
+    description: "Downlink to acc-dc1-f2-01"
+    allowed_vlans: "10,11,12,999"
+  - interface: Port-channel13
+    description: "Downlink to acc-dc1-f3-01"
+    allowed_vlans: "10,11,12,999"
+
+track_objects:
+  - { id: 1, interface: TenGigabitEthernet1/0/1 }
+
+# --- Routing -----------------------------------------------------------------
+ospf:
+  process_id: 1
+  router_id: 10.30.255.11
+  areas:
+    - { id: 0 }
+    - { id: 10 }
+
+bgp:
+  local_as: 65001
+  router_id: 10.30.255.11
+  peers:
+    - address: 10.30.254.1
+      remote_as: 65001
+      description: "iBGP to wan-dc1-01"
+      password_encrypted: "{{ vault_bgp_password }}"
+      route_map_in: RM-WAN-IN
+      route_map_out: RM-WAN-OUT
+      max_prefix: 5000
+  advertised_networks:
+    - { prefix: 10.30.0.0, mask: 255.255.0.0, prefix_length: 16, wildcard: 0.0.255.255 }
