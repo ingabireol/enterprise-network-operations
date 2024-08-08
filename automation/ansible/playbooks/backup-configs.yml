@@ -1,0 +1,56 @@
+---
+# ===========================================================================
+# backup-configs.yml — retrieve and archive every device configuration.
+#
+#   ansible-playbook playbooks/backup-configs.yml
+#
+# The Python tool (netops.backup) is the scheduled path because it normalises
+# and redacts. This playbook exists for the case where Ansible is already the
+# tool in hand, and it produces the same directory layout.
+# ===========================================================================
+
+- name: Back up network device configurations
+  hosts: all
+  gather_facts: false
+  vars:
+    backup_dir: "{{ playbook_dir }}/../../../backups"
+  tasks:
+
+    - name: Create the per-site backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}/{{ site | default('unknown') }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Retrieve the running configuration (IOS)
+      cisco.ios.ios_config:
+        backup: true
+        backup_options:
+          filename: "{{ inventory_hostname }}.cfg"
+          dir_path: "{{ backup_dir }}/{{ site | default('unknown') }}"
+      when: ansible_network_os == 'cisco.ios.ios'
+      register: _ios_backup
+
+    - name: Retrieve the running configuration (NX-OS)
+      cisco.nxos.nxos_config:
+        backup: true
+        backup_options:
+          filename: "{{ inventory_hostname }}.cfg"
+          dir_path: "{{ backup_dir }}/{{ site | default('unknown') }}"
+      when: ansible_network_os == 'cisco.nxos.nxos'
+      register: _nxos_backup
+
+    - name: Retrieve the running configuration (ASA)
+      cisco.asa.asa_config:
+        backup: true
+        backup_options:
+          filename: "{{ inventory_hostname }}.cfg"
+          dir_path: "{{ backup_dir }}/{{ site | default('unknown') }}"
+      when: ansible_network_os == 'cisco.asa.asa'
+      register: _asa_backup
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: configuration archived"

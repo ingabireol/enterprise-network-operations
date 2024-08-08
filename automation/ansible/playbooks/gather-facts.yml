@@ -1,0 +1,69 @@
+---
+# ===========================================================================
+# gather-facts.yml — collect structured facts from every device.
+#
+# Produces a JSON document per device under reports/facts/, which is what the
+# inventory reconciliation, the capacity review and the lifecycle planning all
+# read rather than each collecting the same data again.
+# ===========================================================================
+
+- name: Gather network device facts
+  hosts: all
+  gather_facts: false
+  vars:
+    facts_dir: "{{ playbook_dir }}/../../../reports/facts"
+  tasks:
+
+    - name: Create the facts directory
+      ansible.builtin.file:
+        path: "{{ facts_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Gather IOS facts
+      cisco.ios.ios_facts:
+        gather_subset: [hardware, config, interfaces]
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Gather NX-OS facts
+      cisco.nxos.nxos_facts:
+        gather_subset: [hardware, config, interfaces]
+      when: ansible_network_os == 'cisco.nxos.nxos'
+
+    - name: Gather ASA facts
+      cisco.asa.asa_facts:
+        gather_subset: [hardware, config]
+      when: ansible_network_os == 'cisco.asa.asa'
+
+    - name: Write the facts document
+      ansible.builtin.copy:
+        content: "{{ ansible_facts | to_nice_json }}"
+        dest: "{{ facts_dir }}/{{ inventory_hostname }}.json"
+        mode: "0644"
+      delegate_to: localhost
+
+    - name: Summarise
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          model={{ ansible_net_model | default('unknown') }},
+          version={{ ansible_net_version | default('unknown') }},
+          serial={{ ansible_net_serialnum | default('unknown') }},
+          uptime={{ ansible_net_uptime | default('unknown') }},
+          memfree={{ ansible_net_memfree_mb | default('?') }}MB
+
+- name: Estate summary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Software version spread
+      ansible.builtin.debug:
+        msg: >-
+          {{ groups['all']
+             | map('extract', hostvars, 'ansible_net_version')
+             | select('defined') | list | unique | sort | join(', ') }}
+      # More than two or three distinct versions across an estate this size is a
+      # lifecycle finding: every extra version is another advisory to assess and
+      # another set of behaviours to remember during an incident.
