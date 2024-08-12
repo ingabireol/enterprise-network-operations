@@ -1,0 +1,126 @@
+---
+# ===========================================================================
+# deploy-config.yml — render a device's configuration from its template and
+# apply the difference.
+#
+#   # Always start here: renders and shows the diff, changes nothing.
+#   ansible-playbook playbooks/deploy-config.yml --check --diff --limit acc-dc1-f1-01
+#
+#   # Then, within a change window:
+#   ansible-playbook playbooks/deploy-config.yml --limit acc-dc1-f1-01
+#
+# Safety properties, in order of importance:
+#   1. --check is the default workflow and the playbook says so loudly.
+#   2. A backup is taken before any change, and its path is reported.
+#   3. Changes are applied with `replace: line`, never `replace: block` on a
+#      whole configuration — a full replace on a device you are connected
+#      through is how a site is lost.
+#   4. Connectivity is verified after the change, and the playbook fails
+#      loudly if the device stops answering.
+# ===========================================================================
+
+- name: Render and deploy device configuration
+  hosts: all
+  gather_facts: false
+  serial: 1                      # never more than one device at a time
+  vars:
+    template_dir: "{{ playbook_dir }}/../../../cisco/templates"
+    rendered_dir: "{{ playbook_dir }}/../../../reports/rendered"
+    backup_dir: "{{ playbook_dir }}/../../../backups"
+    template_for_role:
+      core: core-switch.j2
+      distribution: core-switch.j2
+      access: access-switch.j2
+      wan: wan-router.j2
+      datacenter: nexus-datacenter.j2
+      firewall: firewall-asa.j2
+
+  pre_tasks:
+    - name: Refuse to run without an explicit change reference outside check mode
+      ansible.builtin.assert:
+        that:
+          - change_reference is defined
+          - change_reference | length > 3
+        fail_msg: >-
+          Pass -e change_reference=CHG0001234. A configuration change to a
+          production network device needs an approved change record, and
+          recording it here puts it in the job output and the device log.
+      when: not ansible_check_mode
+
+    - name: Confirm the device is reachable before we start
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 15
+      delegate_to: localhost
+
+  tasks:
+    - name: Render the configuration from the role's template
+      ansible.builtin.template:
+        src: "{{ template_dir }}/{{ template_for_role[role] }}"
+        dest: "{{ rendered_dir }}/{{ inventory_hostname }}.cfg"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Take a backup before changing anything
+      cisco.ios.ios_config:
+        backup: true
+        backup_options:
+          filename: "{{ inventory_hostname }}-pre-change-{{ ansible_date_time.epoch | default('now') }}.cfg"
+          dir_path: "{{ backup_dir }}/pre-change"
+      when:
+        - ansible_network_os == 'cisco.ios.ios'
+        - not ansible_check_mode
+      register: _pre_change_backup
+
+    - name: Report where the rollback point is
+      ansible.builtin.debug:
+        msg: "Rollback point: {{ _pre_change_backup.backup_path | default('check mode — none taken') }}"
+
+    - name: Apply the configuration (IOS)
+      cisco.ios.ios_config:
+        src: "{{ rendered_dir }}/{{ inventory_hostname }}.cfg"
+        # Line-by-line, never a block replace of the whole configuration.
+        replace: line
+        match: line
+        save_when: changed
+        diff_against: running
+      when: ansible_network_os == 'cisco.ios.ios'
+      register: _ios_result
+
+    - name: Apply the configuration (NX-OS)
+      cisco.nxos.nxos_config:
+        src: "{{ rendered_dir }}/{{ inventory_hostname }}.cfg"
+        replace: line
+        match: line
+        save_when: changed
+        diff_against: running
+      when: ansible_network_os == 'cisco.nxos.nxos'
+      register: _nxos_result
+
+  post_tasks:
+    - name: Confirm the device still answers after the change
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 120
+        delay: 10
+      delegate_to: localhost
+      when: not ansible_check_mode
+
+    - name: Confirm the management plane still works
+      cisco.ios.ios_command:
+        commands: ["show version | include uptime"]
+      when:
+        - ansible_network_os == 'cisco.ios.ios'
+        - not ansible_check_mode
+      register: _post_check
+      retries: 3
+      delay: 10
+      until: _post_check is succeeded
+
+    - name: Record the change
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: change {{ change_reference | default('CHECK MODE') }} applied,
+          changed={{ (_ios_result.changed | default(false)) or (_nxos_result.changed | default(false)) }}

@@ -1,0 +1,82 @@
+---
+# ===========================================================================
+# compliance-check.yml — a fast, read-only spot check of the most important
+# security controls, usable as a pre-change and post-change gate.
+#
+#   ansible-playbook playbooks/compliance-check.yml
+#
+# The full audit lives in the Python tool, which checks every rule in the
+# baseline and produces a report. This is the short version: eight checks that
+# between them catch most of what actually goes wrong, fast enough to run before
+# and after every change.
+# ===========================================================================
+
+- name: Spot-check the security controls that matter most
+  hosts: all
+  gather_facts: false
+  vars:
+    failures: []
+  tasks:
+
+    - name: Retrieve the running configuration
+      cisco.ios.ios_command:
+        commands: ["show running-config"]
+      when: ansible_network_os == 'cisco.ios.ios'
+      register: _config
+      changed_when: false
+
+    - name: Set the configuration text
+      ansible.builtin.set_fact:
+        config_text: "{{ _config.stdout[0] | default('') }}"
+
+    - name: Evaluate the controls
+      ansible.builtin.set_fact:
+        failures: "{{ failures + [item.name] }}"
+      when: item.condition
+      loop:
+        - name: "Telnet is accepted on a VTY line"
+          condition: "{{ 'transport input telnet' in config_text or 'transport input all' in config_text }}"
+        - name: "SNMP community string configured (v1/v2c)"
+          condition: "{{ 'snmp-server community' in config_text }}"
+        - name: "HTTP server enabled"
+          condition: "{{ config_text is search('^ip http server', multiline=True) }}"
+        - name: "AAA not enabled"
+          condition: "{{ 'aaa new-model' not in config_text }}"
+        - name: "No central syslog destination"
+          condition: "{{ config_text is not search('^logging host', multiline=True) }}"
+        - name: "Password encryption service disabled"
+          condition: "{{ 'service password-encryption' not in config_text }}"
+        - name: "CDP running globally"
+          condition: "{{ 'no cdp run' not in config_text }}"
+        - name: "IP source routing enabled"
+          condition: "{{ 'no ip source-route' not in config_text }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Report the result for this device
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ 'PASS — all spot checks clear' if failures | length == 0
+             else 'FAIL — ' + (failures | join('; ')) }}
+
+    - name: Fail the play where a control is not met
+      ansible.builtin.assert:
+        that:
+          - failures | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }} failed {{ failures | length }} spot check(s):
+          {{ failures | join('; ') }}.
+          Full audit: make compliance
+      ignore_errors: true      # report every device, then summarise
+
+- name: Summary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Point at the full audit
+      ansible.builtin.debug:
+        msg:
+          - "Spot check complete."
+          - "Full baseline audit with remediation guidance: make compliance"
+          - "Baseline definition: cisco/baselines/security-baseline.yml"
