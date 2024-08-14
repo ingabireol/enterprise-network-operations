@@ -1,0 +1,23 @@
+# Network automation toolkit dependencies.
+# Pinned to minor versions: a network automation tool that changes behaviour on
+# an unattended upgrade is a liability.
+
+netmiko>=4.3.0,<5.0
+napalm>=4.1.0,<5.0
+nornir>=3.4.1,<4.0
+nornir-netmiko>=1.0.1,<2.0
+nornir-utils>=0.2.0,<1.0
+paramiko>=3.4.0
+pyyaml>=6.0.1
+jinja2>=3.1.3
+ciscoconfparse>=1.9.41
+rich>=13.7.0
+click>=8.1.7
+tabulate>=0.9.0
+pysnmp>=6.0.0
+
+# Development
+pytest>=8.0.0
+pytest-cov>=4.1.0
+ruff>=0.3.0
+yamllint>=1.35.0
