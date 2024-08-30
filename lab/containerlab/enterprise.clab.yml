@@ -1,0 +1,169 @@
+---
+# ===========================================================================
+# containerlab topology reproducing the production design in miniature.
+#
+#   sudo containerlab deploy -t lab/containerlab/enterprise.clab.yml
+#
+# Why this exists: a change that has only ever been tested by reading it is a
+# change that gets tested in production. This topology has the same routing
+# protocols, the same segmentation, the same authentication and the same
+# addressing structure as the real network, so a configuration change can be
+# proven here first.
+#
+# It is not a full copy — there is one access switch rather than eight, and the
+# firewall is represented by a Linux host with nftables. What it does reproduce
+# faithfully is everything a configuration change is likely to break: adjacency,
+# authentication, the segmentation policy, and the failover behaviour.
+#
+# Images: Cisco does not redistribute IOS-XE container images. Supply your own
+# under a valid licence, or substitute the FRR nodes noted below, which exercise
+# the routing design if not the vendor syntax.
+# ===========================================================================
+
+name: enterprise-network
+
+mgmt:
+  network: enterprise-mgmt
+  ipv4-subnet: 172.20.20.0/24
+
+topology:
+
+  defaults:
+    env:
+      LAB: enterprise-network
+
+  kinds:
+    cisco_c8000v:
+      image: ${IOSXE_IMAGE:-vrnetlab/cisco_c8000v:17.09.04a}
+      startup-config: configs/__ROLE__.cfg
+    linux:
+      image: wbitt/network-multitool:alpine-extra
+
+  nodes:
+
+    # --- Primary site core ------------------------------------------------
+    core-dc1-01:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.11
+      startup-config: configs/core-dc1-01.cfg
+      labels:
+        role: core
+        site: dc-primary
+
+    core-dc1-02:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.12
+      startup-config: configs/core-dc1-02.cfg
+      labels:
+        role: core
+        site: dc-primary
+
+    # --- Primary site access ------------------------------------------------
+    acc-dc1-01:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.13
+      startup-config: configs/acc-dc1-01.cfg
+      labels:
+        role: access
+        site: dc-primary
+
+    # --- Primary site WAN ---------------------------------------------------
+    wan-dc1-01:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.14
+      startup-config: configs/wan-dc1-01.cfg
+      labels:
+        role: wan
+        site: dc-primary
+
+    # --- Provider (simulates the two upstream ASes) -------------------------
+    provider-a:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.20
+      startup-config: configs/provider-a.cfg
+      labels:
+        role: provider
+
+    provider-b:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.21
+      startup-config: configs/provider-b.cfg
+      labels:
+        role: provider
+
+    # --- Secondary site ------------------------------------------------------
+    core-dc2-01:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.31
+      startup-config: configs/core-dc2-01.cfg
+      labels:
+        role: core
+        site: dc-secondary
+
+    wan-dc2-01:
+      kind: cisco_c8000v
+      mgmt-ipv4: 172.20.20.32
+      startup-config: configs/wan-dc2-01.cfg
+      labels:
+        role: wan
+        site: dc-secondary
+
+    # --- End hosts, one per segment, to prove the policy actually holds ------
+    host-user:
+      kind: linux
+      mgmt-ipv4: 172.20.20.101
+      exec:
+        - ip addr add 10.30.10.100/24 dev eth1
+        - ip route add 10.30.0.0/16 via 10.30.10.1
+
+    host-app:
+      kind: linux
+      mgmt-ipv4: 172.20.20.102
+      exec:
+        - ip addr add 10.30.20.100/24 dev eth1
+        - ip route add 10.30.0.0/16 via 10.30.20.1
+
+    host-db:
+      kind: linux
+      mgmt-ipv4: 172.20.20.103
+      exec:
+        - ip addr add 10.30.30.100/24 dev eth1
+        - ip route add 10.30.0.0/16 via 10.30.30.1
+        # Listens on 5432 so the segmentation tests have something to connect to.
+        - sh -c "nc -lk -p 5432 >/dev/null 2>&1 &"
+
+    host-dr-db:
+      kind: linux
+      mgmt-ipv4: 172.20.20.104
+      exec:
+        - ip addr add 10.40.30.100/24 dev eth1
+        - ip route add 10.0.0.0/8 via 10.40.30.1
+        - sh -c "nc -lk -p 5432 >/dev/null 2>&1 &"
+
+  links:
+    # StackWise Virtual link between the core pair
+    - endpoints: ["core-dc1-01:Gi0/0/1", "core-dc1-02:Gi0/0/1"]
+    - endpoints: ["core-dc1-01:Gi0/0/2", "core-dc1-02:Gi0/0/2"]
+
+    # Access to core (dual-homed)
+    - endpoints: ["acc-dc1-01:Gi0/0/1", "core-dc1-01:Gi0/0/3"]
+    - endpoints: ["acc-dc1-01:Gi0/0/2", "core-dc1-02:Gi0/0/3"]
+
+    # Core to WAN
+    - endpoints: ["core-dc1-01:Gi0/0/4", "wan-dc1-01:Gi0/0/1"]
+    - endpoints: ["core-dc1-02:Gi0/0/4", "wan-dc1-01:Gi0/0/2"]
+
+    # WAN to the two providers
+    - endpoints: ["wan-dc1-01:Gi0/0/3", "provider-a:Gi0/0/1"]
+    - endpoints: ["wan-dc1-01:Gi0/0/4", "provider-b:Gi0/0/1"]
+
+    # Secondary site
+    - endpoints: ["wan-dc2-01:Gi0/0/3", "provider-a:Gi0/0/2"]
+    - endpoints: ["wan-dc2-01:Gi0/0/4", "provider-b:Gi0/0/2"]
+    - endpoints: ["core-dc2-01:Gi0/0/4", "wan-dc2-01:Gi0/0/1"]
+
+    # Hosts
+    - endpoints: ["host-user:eth1", "acc-dc1-01:Gi0/0/5"]
+    - endpoints: ["host-app:eth1", "core-dc1-01:Gi0/0/5"]
+    - endpoints: ["host-db:eth1", "core-dc1-02:Gi0/0/5"]
+    - endpoints: ["host-dr-db:eth1", "core-dc2-01:Gi0/0/5"]

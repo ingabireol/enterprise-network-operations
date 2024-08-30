@@ -1,0 +1,68 @@
+---
+# Device register for the containerlab topology.
+#
+# Same schema as the production register, so every tool in automation/python
+# works against the lab unchanged — which is the point: a tool that has to be
+# special-cased for the lab is a tool the lab does not actually test.
+
+devices:
+  - hostname: core-dc1-01
+    address: 172.20.20.11
+    platform: iosxe
+    model: C8000V
+    site: lab
+    role: core
+    tags: [lab]
+
+  - hostname: core-dc1-02
+    address: 172.20.20.12
+    platform: iosxe
+    model: C8000V
+    site: lab
+    role: core
+    tags: [lab]
+
+  - hostname: acc-dc1-01
+    address: 172.20.20.13
+    platform: iosxe
+    model: C8000V
+    site: lab
+    role: access
+    tags: [lab]
+
+  - hostname: wan-dc1-01
+    address: 172.20.20.14
+    platform: iosxe
+    model: C8000V
+    site: lab
+    role: wan
+    tags: [lab]
+
+  - hostname: core-dc2-01
+    address: 172.20.20.31
+    platform: iosxe
+    model: C8000V
+    site: lab
+    role: core
+    tags: [lab]
+
+  - hostname: wan-dc2-01
+    address: 172.20.20.32
+    platform: iosxe
+    model: C8000V
+    site: lab
+    role: wan
+    tags: [lab]
+
+all:
+  children:
+    lab:
+      hosts:
+        core-dc1-01: { ansible_host: 172.20.20.11 }
+        core-dc1-02: { ansible_host: 172.20.20.12 }
+        acc-dc1-01:  { ansible_host: 172.20.20.13 }
+        wan-dc1-01:  { ansible_host: 172.20.20.14 }
+        core-dc2-01: { ansible_host: 172.20.20.31 }
+        wan-dc2-01:  { ansible_host: 172.20.20.32 }
+      vars:
+        ansible_network_os: cisco.ios.ios
