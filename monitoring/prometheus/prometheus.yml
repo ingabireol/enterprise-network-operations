@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Prometheus configuration for the network estate.
+#
+# Three sources, deliberately:
+#   * snmp_exporter for device counters — interfaces, CPU, memory, environment
+#   * blackbox_exporter for reachability and latency between sites
+#   * the netops health poller's textfile output for the things SNMP does not
+#     expose usefully (BGP session states, vPC adjacency, failover readiness)
+# ---------------------------------------------------------------------------
+global:
+  scrape_interval: 60s          # SNMP is expensive; 60s is the right cadence
+  scrape_timeout: 45s
+  evaluation_interval: 30s
+  external_labels:
+    estate: network
+    monitor: netops
+
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+
+  # --- Switches and routers via SNMP --------------------------------------
+  - job_name: snmp-network-devices
+    scrape_interval: 60s
+    scrape_timeout: 45s
+    metrics_path: /snmp
+    params:
+      auth: [netops_v3]
+      module: [cisco_device]
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/network-*.yml']
+        refresh_interval: 5m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: snmp-exporter:9116
+    metric_relabel_configs:
+      # An estate this size has thousands of interfaces and most are idle access
+      # ports. Keeping every counter for all of them buries the uplinks that
+      # actually matter.
+      - source_labels: [ifAlias]
+        regex: '^$'
+        action: drop
+      - source_labels: [__name__]
+        regex: 'ifHC?(In|Out)(Broadcast|Multicast)Pkts'
+        action: drop
+
+  # --- Firewalls -----------------------------------------------------------
+  - job_name: snmp-firewalls
+    scrape_interval: 60s
+    metrics_path: /snmp
+    params:
+      auth: [netops_v3]
+      module: [cisco_asa]
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/firewall-*.yml']
+
+  # --- Reachability and latency -------------------------------------------
+  - job_name: blackbox-icmp
+    scrape_interval: 30s        # faster: this is the outage signal
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/probe-*.yml']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # --- netops health poller (textfile) ------------------------------------
+  - job_name: netops-health
+    scrape_interval: 300s
+    static_configs:
+      - targets: ['netops-exporter:9100']

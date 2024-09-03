@@ -1,0 +1,106 @@
+---
+# ---------------------------------------------------------------------------
+# snmp_exporter configuration.
+#
+# Generated from the Cisco MIBs with the generator, then trimmed. The trimming
+# matters: the full Cisco MIB tree produces tens of thousands of metrics per
+# device, most of which nobody will ever query, and polling them all makes the
+# scrape slower than the interval.
+#
+# What is kept is what an alert or a dashboard actually reads.
+# ---------------------------------------------------------------------------
+
+auths:
+  netops_v3:
+    username: netops-monitor
+    security_level: authPriv
+    password: ${SNMP_AUTH_PASSWORD}
+    auth_protocol: SHA
+    priv_protocol: AES
+    priv_password: ${SNMP_PRIV_PASSWORD}
+
+modules:
+
+  cisco_device:
+    walk:
+      # System
+      - 1.3.6.1.2.1.1.3          # sysUpTime
+      - 1.3.6.1.2.1.1.5          # sysName
+      # Interfaces — the high-capacity counters, since 32-bit ones wrap in
+      # minutes on a 10G link and produce nonsense rates.
+      - 1.3.6.1.2.1.2.2.1.7      # ifAdminStatus
+      - 1.3.6.1.2.1.2.2.1.8      # ifOperStatus
+      - 1.3.6.1.2.1.2.2.1.14     # ifInErrors
+      - 1.3.6.1.2.1.2.2.1.20     # ifOutErrors
+      - 1.3.6.1.2.1.2.2.1.13     # ifInDiscards
+      - 1.3.6.1.2.1.2.2.1.19     # ifOutDiscards
+      - 1.3.6.1.2.1.31.1.1.1.1   # ifName
+      - 1.3.6.1.2.1.31.1.1.1.6   # ifHCInOctets
+      - 1.3.6.1.2.1.31.1.1.1.10  # ifHCOutOctets
+      - 1.3.6.1.2.1.31.1.1.1.15  # ifHighSpeed
+      - 1.3.6.1.2.1.31.1.1.1.18  # ifAlias
+      # CPU
+      - 1.3.6.1.4.1.9.9.109.1.1.1.1.7   # cpmCPUTotal5minRev
+      - 1.3.6.1.4.1.9.9.109.1.1.1.1.8   # cpmCPUMonInterval
+      # Memory
+      - 1.3.6.1.4.1.9.9.48.1.1.1.5      # ciscoMemoryPoolUsed
+      - 1.3.6.1.4.1.9.9.48.1.1.1.6      # ciscoMemoryPoolFree
+      # Environment
+      - 1.3.6.1.4.1.9.9.13.1.3.1.6      # ciscoEnvMonTemperatureState
+      - 1.3.6.1.4.1.9.9.13.1.3.1.3      # ciscoEnvMonTemperatureValue
+      - 1.3.6.1.4.1.9.9.13.1.5.1.3      # ciscoEnvMonSupplyState
+      - 1.3.6.1.4.1.9.9.13.1.4.1.3      # ciscoEnvMonFanState
+      # BGP
+      - 1.3.6.1.2.1.15.3.1.2            # bgpPeerState
+      - 1.3.6.1.2.1.15.3.1.15           # bgpPeerFsmEstablishedTransitions
+      - 1.3.6.1.2.1.15.3.1.7            # bgpPeerRemoteAddr
+      # OSPF
+      - 1.3.6.1.2.1.14.10.1.6           # ospfNbrState
+      # HSRP
+      - 1.3.6.1.4.1.9.9.106.1.2.1.1.15  # cHsrpGrpStandbyState
+      # Routing table size
+      - 1.3.6.1.2.1.4.24.6              # ipCidrRouteNumber
+      # Configuration change history
+      - 1.3.6.1.4.1.9.9.43.1.1.6.1.3    # ccmHistoryEventCommandSource
+      # Port security
+      - 1.3.6.1.4.1.9.9.315.1.2.1.1.9   # cpsIfViolationCount
+
+    lookups:
+      - source_indexes: [ifIndex]
+        lookup: ifAlias
+      - source_indexes: [ifIndex]
+        lookup: ifName
+
+    overrides:
+      ifAlias:
+        ignore: true            # used as a label, not as a metric
+      ifName:
+        ignore: true
+      ifAdminStatus:
+        type: EnumAsStateSet
+      ifOperStatus:
+        type: EnumAsStateSet
+
+    max_repetitions: 25
+    retries: 3
+    timeout: 20s
+
+  cisco_asa:
+    walk:
+      - 1.3.6.1.2.1.1.3                 # sysUpTime
+      - 1.3.6.1.2.1.2.2.1.8             # ifOperStatus
+      - 1.3.6.1.2.1.31.1.1.1.6          # ifHCInOctets
+      - 1.3.6.1.2.1.31.1.1.1.10         # ifHCOutOctets
+      - 1.3.6.1.2.1.31.1.1.1.18         # ifAlias
+      - 1.3.6.1.4.1.9.9.147.1.2.2.2.1.5 # cfwConnectionStatValue (connections)
+      - 1.3.6.1.4.1.9.9.147.1.2.1.1.1.3 # cfwHardwareStatusValue (failover)
+      - 1.3.6.1.4.1.9.9.109.1.1.1.1.7   # CPU
+      - 1.3.6.1.4.1.9.9.48.1.1.1.5      # memory used
+      - 1.3.6.1.4.1.9.9.48.1.1.1.6      # memory free
+
+    lookups:
+      - source_indexes: [ifIndex]
+        lookup: ifAlias
+
+    max_repetitions: 20
+    timeout: 20s

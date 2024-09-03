@@ -1,0 +1,4 @@
+- targets: ['10.30.1.51', '10.30.1.52']
+  labels: { site: dc-primary, role: firewall, criticality: high }
+- targets: ['10.40.1.51']
+  labels: { site: dc-secondary, role: firewall, criticality: high }

@@ -1,0 +1,25 @@
+# Generated from automation/ansible/inventory/devices.yml; checked in so the
+# intended monitoring coverage is reviewable alongside the register.
+- targets: ['10.30.1.11', '10.30.1.12']
+  labels: { site: dc-primary, role: core, criticality: high }
+
+- targets: ['10.30.1.21', '10.30.1.22']
+  labels: { site: dc-primary, role: datacenter, criticality: high }
+
+- targets: ['10.30.1.31', '10.30.1.32', '10.30.1.33']
+  labels: { site: dc-primary, role: access, criticality: medium }
+
+- targets: ['10.30.1.41']
+  labels: { site: dc-primary, role: wan, criticality: high }
+
+- targets: ['10.40.1.11']
+  labels: { site: dc-secondary, role: core, criticality: high }
+
+- targets: ['10.40.1.21']
+  labels: { site: dc-secondary, role: datacenter, criticality: high }
+
+- targets: ['10.40.1.31']
+  labels: { site: dc-secondary, role: access, criticality: medium }
+
+- targets: ['10.40.1.41']
+  labels: { site: dc-secondary, role: wan, criticality: high }
