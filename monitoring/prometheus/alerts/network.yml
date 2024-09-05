@@ -1,0 +1,367 @@
+---
+# ---------------------------------------------------------------------------
+# Network alerts.
+#
+# The test each rule has to pass before it belongs here: if this fires at 03:00,
+# is there something a person should do about it right now? If not, it is a
+# dashboard panel or a weekly report, not an alert.
+# ---------------------------------------------------------------------------
+groups:
+
+  - name: device-availability
+    interval: 30s
+    rules:
+
+      - alert: DeviceUnreachable
+        expr: probe_success{probe_type="device"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "{{ $labels.instance }} ({{ $labels.role }}) is not responding to ICMP"
+          description: >-
+            No response for 2 minutes. On a redundant pair this may not be
+            user-visible, which is exactly why it needs an alert — a silently
+            failed device means the redundancy is gone and nobody knows.
+          action: >-
+            Check the console or out-of-band access. If it is one of a redundant
+            pair, confirm the survivor is carrying the load before doing anything
+            that might disturb it.
+          runbook: docs/runbooks/outage-triage.md
+
+      - alert: BothCoreSwitchesUnreachable
+        expr: count(probe_success{role="core", site="dc-primary"} == 1) == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: network
+          page: immediate
+        annotations:
+          summary: "Both primary-site core switches are unreachable"
+          description: "The primary site has lost its core. Everything behind it is down."
+          action: "Site-level incident. docs/runbooks/outage-triage.md, then consider DR."
+          runbook: docs/runbooks/wan-failover.md
+
+      - alert: SNMPPollFailing
+        expr: up{job=~"snmp-.*"} == 0
+        for: 10m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "SNMP polling of {{ $labels.instance }} has failed for 10 minutes"
+          description: >-
+            The device may be reachable while SNMP is not answering — a wedged
+            SNMP process, or a changed access list. Either way this device is now
+            unmonitored.
+          action: "Confirm ICMP reachability, then check the SNMP configuration and the management ACL."
+
+  - name: device-resources
+    interval: 60s
+    rules:
+
+      - alert: DeviceCPUHigh
+        expr: cisco_cpu_5min_percent > 80
+        for: 15m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.instance }} CPU is at {{ $value }}% (15-minute sustained)"
+          description: >-
+            Sustained high CPU on a switch usually means traffic is being punted
+            to the CPU rather than switched in hardware — a routing problem, a
+            loop, or an access list that cannot be offloaded.
+          action: "`show processes cpu sorted` to find the process. docs/runbooks/outage-triage.md#high-cpu"
+
+      - alert: DeviceMemoryHigh
+        expr: cisco_memory_used_percent > 85
+        for: 30m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.instance }} memory is at {{ $value }}%"
+          description: >-
+            Steadily rising memory on a network device is usually a leak. The
+            device works until it abruptly does not, typically during a routing
+            reconvergence when it needs memory it does not have.
+          action: "Compare against the 7-day trend. A steady climb is a leak — plan a reload and check for a known bug."
+
+      - alert: DeviceTemperatureAlarm
+        expr: cisco_environment_temperature_state != 1
+        for: 5m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "{{ $labels.instance }} temperature alarm"
+          description: "The device will shut itself down to protect the hardware if this continues."
+          action: "Check data centre cooling and the device's airflow path immediately."
+
+      - alert: PowerSupplyFailed
+        expr: cisco_environment_power_state != 1
+        for: 5m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "{{ $labels.instance }} power supply fault"
+          description: >-
+            Redundancy is gone. The device is running on one supply and the next
+            failure is an outage.
+          action: "Raise a hardware replacement. Treat as urgent even though nothing is down yet."
+
+      - alert: DeviceRebooted
+        expr: sysUpTime < 600
+        for: 1m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.instance }} rebooted less than 10 minutes ago"
+          action: >-
+            If this was not planned, check the crashinfo and the power event log.
+            An unexplained reboot on a network device is often the first of several.
+
+  - name: interfaces
+    interval: 60s
+    rules:
+
+      - alert: InterfaceDown
+        expr: ifOperStatus{ifAdminStatus="1"} != 1
+        for: 5m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.ifAlias }} on {{ $labels.instance }} is down"
+          description: "The interface is administratively up but the line protocol is down."
+          action: "Check the far end, then the optic, then the cable. docs/runbooks/outage-triage.md#interface"
+
+      - alert: UplinkDown
+        expr: ifOperStatus{ifAlias=~".*[Uu]plink.*|.*[Cc]ore.*", ifAdminStatus="1"} != 1
+        for: 2m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "Uplink {{ $labels.ifAlias }} on {{ $labels.instance }} is down"
+          description: "An uplink loss means either a path has been lost or redundancy has been."
+          action: "Confirm the redundant path is carrying traffic before troubleshooting the failed one."
+
+      - alert: InterfaceErrorsIncreasing
+        expr: rate(ifInErrors[15m]) > 0 or rate(ifOutErrors[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.ifAlias }} on {{ $labels.instance }} is accumulating errors"
+          description: >-
+            Errors that increase steadily are physical — a failing optic, a dirty
+            connector, or a duplex mismatch. This does not take the link down; it
+            corrupts a fraction of frames, TCP retransmits, and users report that
+            the system is slow.
+          action: >-
+            `show interface <x>` and look at CRC specifically. CRC errors are
+            always physical. Clean or replace the optic before assuming software.
+          runbook: docs/runbooks/outage-triage.md#interface-errors
+
+      - alert: InterfaceDiscards
+        expr: rate(ifOutDiscards[10m]) > 10
+        for: 15m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.ifAlias }} on {{ $labels.instance }} is discarding output"
+          description: "Discards without high utilisation point at a queue policy, not at capacity."
+          action: "Check utilisation first. If it is low, the QoS policy is dropping traffic it should not."
+
+      - alert: InterfaceUtilisationHigh
+        expr: |
+          (rate(ifHCInOctets[10m]) * 8 / (ifHighSpeed * 1000000)) > 0.80
+          or (rate(ifHCOutOctets[10m]) * 8 / (ifHighSpeed * 1000000)) > 0.80
+        for: 30m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.ifAlias }} on {{ $labels.instance }} is over 80% utilised"
+          description: >-
+            Sustained. At this level queuing delay becomes noticeable to
+            interactive traffic well before the link is actually full.
+          action: "Check the top talkers in the flow data, then plan capacity."
+
+      - alert: DuplexMismatch
+        expr: cisco_interface_duplex == 1 and ifHighSpeed >= 100
+        for: 10m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $labels.ifAlias }} on {{ $labels.instance }} is half duplex at {{ $labels.ifHighSpeed }}Mb"
+          description: >-
+            Half duplex on a link faster than 10Mb is a mismatch, not a choice.
+            It produces collisions and late collisions, and presents to users as
+            severe slowness on that one port.
+          action: "Set speed and duplex explicitly on both ends, or auto on both ends. Never one of each."
+
+  - name: routing
+    interval: 30s
+    rules:
+
+      - alert: BGPSessionDown
+        expr: bgpPeerState != 6
+        for: 3m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "BGP session to {{ $labels.bgpPeerRemoteAddr }} on {{ $labels.instance }} is not established"
+          description: >-
+            State {{ $value }} (6 = established). If this is a provider session,
+            traffic is now taking the other path — or no path.
+          action: >-
+            `show ip bgp neighbors <peer>` for the last error. Check the interface
+            and the authentication before contacting the provider.
+          runbook: docs/runbooks/wan-failover.md
+
+      - alert: BGPSessionFlapping
+        expr: changes(bgpPeerFsmEstablishedTransitions[30m]) > 3
+        for: 5m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "BGP session to {{ $labels.bgpPeerRemoteAddr }} has flapped {{ $value }} times in 30 minutes"
+          description: >-
+            A flapping session is worse than a down one: each transition causes a
+            reconvergence, and traffic moves back and forth between paths with
+            packet loss at every change.
+          action: "Damp it by shutting the session administratively, then diagnose. A stable single path beats an unstable pair."
+
+      - alert: OSPFNeighbourLost
+        expr: ospfNbrState < 8
+        for: 3m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "OSPF neighbour {{ $labels.ospfNbrIpAddr }} on {{ $labels.instance }} is not FULL"
+          action: "Check the interface, the area configuration, the MTU, and the authentication key."
+
+      - alert: RouteTableShrank
+        expr: |
+          (ipCidrRouteNumber - ipCidrRouteNumber offset 10m) / (ipCidrRouteNumber offset 10m) < -0.20
+        for: 5m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "The routing table on {{ $labels.instance }} lost over 20% of its routes"
+          description: >-
+            A sudden loss of routes means a peer or an area has gone away.
+            Destinations are now unreachable that were reachable ten minutes ago.
+          action: "Check BGP and OSPF neighbour states first. docs/runbooks/outage-triage.md"
+
+  - name: high-availability
+    interval: 60s
+    rules:
+
+      - alert: HSRPStateChanged
+        expr: changes(cHsrpGrpStandbyState[15m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "HSRP group on {{ $labels.instance }} has changed state repeatedly"
+          description: >-
+            Gateway redundancy flapping. Every transition is a brief loss of the
+            default gateway for that VLAN, which users experience as intermittent
+            connectivity with no obvious cause.
+          action: "Check the tracked interface and the peer's reachability."
+
+      - alert: FirewallFailoverNotReady
+        expr: cfwHardwareStatusValue{cfwHardwareInformation="secondary"} != 3
+        for: 5m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "The standby firewall is not in a ready state"
+          description: >-
+            A standby unit that is not ready is a redundancy that does not exist,
+            and it is invisible until the day it is needed.
+          action: "`show failover` on both units. Check the failover link and version parity."
+
+      - alert: VPCPeerLinkDown
+        expr: cvpcStatusPeerLinkOperStatus != 1
+        for: 2m
+        labels:
+          severity: critical
+          team: network
+        annotations:
+          summary: "vPC peer link on {{ $labels.instance }} is down"
+          description: >-
+            With the peer link down, the secondary switch suspends its vPC member
+            ports. Servers bonded across the pair lose half their links, and if
+            the keepalive is also down, both switches may believe they are primary.
+          action: "Check the peer link and the peer keepalive. docs/runbooks/outage-triage.md#vpc"
+
+  - name: security
+    interval: 60s
+    rules:
+
+      - alert: ConfigurationChangedOutsideWindow
+        expr: |
+          changes(ccmHistoryEventCommandSource[1h]) > 0
+          and on() (hour() < 22 and hour() > 2)
+          and on() (day_of_week() > 0 and day_of_week() < 6)
+        for: 5m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "Configuration on {{ $labels.instance }} changed outside the change window"
+          description: >-
+            Not necessarily wrong — emergency changes happen. But every one of
+            these should have a change record, and the ones that do not are worth
+            a conversation.
+          action: "Run `make diff` to see what changed, then match it against the change record."
+
+      - alert: PortSecurityViolation
+        expr: increase(cpsIfViolationCount[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "Port security violation on {{ $labels.instance }} {{ $labels.ifAlias }}"
+          description: >-
+            More MAC addresses than permitted on an access port. Usually an
+            unmanaged switch under a desk; occasionally something else.
+          action: "`show port-security interface <x>` for the offending MAC, then trace it."
+
+      - alert: AuthenticationFailuresHigh
+        expr: increase(cAAAServerAuthenFails[10m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "{{ $value }} authentication failures on {{ $labels.instance }} in 10 minutes"
+          action: "Check the source. A misconfigured automation account looks identical to a brute force at first."
+
+      - alert: ComplianceFailuresPresent
+        expr: network_compliance_failures{severity=~"critical|high"} > 0
+        for: 1h
+        labels:
+          severity: warning
+          team: network
+        annotations:
+          summary: "{{ $value }} high or critical compliance failure(s) on {{ $labels.device }}"
+          action: "Open the nightly report: reports/compliance.html"
