@@ -1,0 +1,69 @@
+---
+# Ships the collected network device logs into Loki, with just enough parsing to
+# make them searchable by device, severity and mnemonic.
+#
+# The labels are chosen carefully. Loki indexes labels, so a label with high
+# cardinality — an interface name, a MAC address, a session id — makes the whole
+# store slow. Those stay in the log line, where a filter expression finds them
+# perfectly well.
+
+server:
+  http_listen_port: 9080
+  log_level: warn
+
+positions:
+  filename: /var/lib/promtail/network-positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    external_labels:
+      source: network-devices
+
+scrape_configs:
+  - job_name: network-syslog
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: network-syslog
+          __path__: /var/log/network/*/*.log
+
+    pipeline_stages:
+      # Extract the device from the path.
+      - regex:
+          source: filename
+          expression: '/var/log/network/(?P<device>[^/]+)/'
+      - labels:
+          device:
+
+      # Cisco messages carry a mnemonic in the form %FACILITY-SEVERITY-MNEMONIC,
+      # which is the most useful thing to filter on.
+      - regex:
+          expression: '^(?P<timestamp>\S+) (?P<host>\S+) (?P<severity>\w+) (?P<facility>\w+) .*%(?P<cisco_facility>[A-Z_0-9]+)-(?P<cisco_severity>\d)-(?P<mnemonic>[A-Z_0-9]+): (?P<message>.*)$'
+      - labels:
+          severity:
+          mnemonic:
+      - timestamp:
+          source: timestamp
+          format: RFC3339
+
+      # Link flapping generates enormous volume during an incident and adds
+      # nothing after the first few lines. Sampled rather than dropped, so the
+      # pattern is still visible.
+      - match:
+          selector: '{job="network-syslog"} |~ "LINEPROTO-5-UPDOWN"'
+          stages:
+            - sampling:
+                rate: 0.2
+
+      # Turn configuration changes into a metric as well as a log line, so the
+      # "changed outside the window" alert has something to fire on.
+      - match:
+          selector: '{job="network-syslog"} |~ "CONFIG_I"'
+          stages:
+            - metrics:
+                network_config_changes_total:
+                  type: Counter
+                  description: "Configuration changes recorded in syslog"
+                  source: mnemonic
+                  config:
+                    action: inc
