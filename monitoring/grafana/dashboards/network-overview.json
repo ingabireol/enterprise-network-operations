@@ -1,0 +1,379 @@
+{
+  "uid": "netops-overview",
+  "title": "Network Overview",
+  "description": "Estate health at a glance. Colour conventions: the four categorical hues (#4a7fe8 blue, #c2531f orange, #10a17a green, #8b5bd6 purple) are assigned to sites and roles in a fixed order and never cycled, so a series keeps its colour when a filter changes the count. Green/amber/red appear only as threshold states. The palette is validated for colour-vision deficiency against both the light and dark surfaces.",
+  "tags": ["network", "overview", "noc"],
+  "timezone": "Africa/Kigali",
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 3,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "site",
+        "label": "Site",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(probe_success, site)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "device",
+        "label": "Device",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(sysUpTime{site=~\"$site\"}, instance)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Estate status",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Devices reachable",
+      "description": "Devices answering ICMP, out of those monitored.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "count(probe_success{probe_type=\"device\", site=~\"$site\"} == 1)", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none", "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "orange", "value": 12 },
+            { "color": "green", "value": 15 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Interfaces down",
+      "description": "Interfaces that are administratively up but whose line protocol is down. Ports deliberately shut are excluded.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "count(ifOperStatus{ifAdminStatus=\"1\", site=~\"$site\"} != 1) or vector(0)", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 3 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "BGP sessions established",
+      "description": "Peers in the established state, out of those configured.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "count(bgpPeerState{site=~\"$site\"} == 6) / count(bgpPeerState{site=~\"$site\"})", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none", "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "orange", "value": 0.99 },
+            { "color": "green", "value": 1 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Inter-site latency",
+      "description": "Round-trip time between the primary and secondary sites. Database replication rides this path, so it is the number the recovery point objective depends on.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "avg(probe_duration_seconds{path=\"inter-site\"})", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 0.03 },
+            { "color": "red", "value": 0.06 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Devices with errors",
+      "description": "Devices with at least one interface accumulating errors in the last 15 minutes.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "count(count by (instance) (rate(ifInErrors{site=~\"$site\"}[15m]) > 0)) or vector(0)", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none", "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 3 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Compliance failures",
+      "description": "High and critical findings from the nightly baseline audit.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sum(network_compliance_failures{severity=~\"critical|high\"}) or vector(0)", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none", "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 5 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Links",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "WAN utilisation",
+      "description": "Inbound and outbound on each WAN circuit. Transmit is drawn negative so both directions read on one axis rather than needing a second scale.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "rate(ifHCInOctets{ifAlias=~\".*[Pp]rovider.*|.*WAN.*\", site=~\"$site\"}[5m]) * 8", "legendFormat": "{{instance}} {{ifAlias}} in" },
+        { "refId": "B", "expr": "-rate(ifHCOutOctets{ifAlias=~\".*[Pp]rovider.*|.*WAN.*\", site=~\"$site\"}[5m]) * 8", "legendFormat": "{{instance}} {{ifAlias}} out" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".* in$" },  "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#4a7fe8" } }] },
+          { "matcher": { "id": "byRegexp", "options": ".* out$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#c2531f" } }] }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Core uplink utilisation",
+      "description": "Percentage of capacity on the core and distribution uplinks.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "(rate(ifHCOutOctets{ifAlias=~\".*[Uu]plink.*|.*[Cc]ore.*\", site=~\"$site\"}[5m]) * 8) / (ifHighSpeed{ifAlias=~\".*[Uu]plink.*|.*[Cc]ore.*\"} * 1000000)", "legendFormat": "{{instance}} {{ifAlias}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "custom": {
+            "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never",
+            "axisSoftMin": 0, "thresholdsStyle": { "mode": "dashed" }
+          },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "red", "value": 0.8 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Interface errors",
+      "description": "Error rate per interface. Any non-zero sustained value is physical — a cable, an optic, or a duplex mismatch.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "refId": "A", "expr": "rate(ifInErrors{site=~\"$site\"}[10m]) > 0", "legendFormat": "{{instance}} {{ifAlias}} in" },
+        { "refId": "B", "expr": "rate(ifOutErrors{site=~\"$site\"}[10m]) > 0", "legendFormat": "{{instance}} {{ifAlias}} out" }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"], "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "auto", "pointSize": 8, "axisSoftMin": 0 },
+          "color": { "mode": "fixed", "fixedColor": "#c2531f" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Inter-site latency and loss",
+      "description": "Round-trip time to the secondary site. Loss appears as a gap in the series — the probe failing is itself the signal.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "refId": "A", "expr": "probe_duration_seconds{path=\"inter-site\"}", "legendFormat": "{{instance}}" }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never",
+            "spanNulls": false, "axisSoftMin": 0, "thresholdsStyle": { "mode": "dashed" }
+          },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "red", "value": 0.06 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Device resources",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "CPU utilisation",
+      "description": "Five-minute average per device. Sustained high CPU on a switch usually means traffic is being punted to the CPU rather than switched in hardware.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "targets": [
+        { "refId": "A", "expr": "cisco_cpu_5min_percent{instance=~\"$device\"}", "legendFormat": "{{instance}}" }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"], "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never", "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "red", "value": 80 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Memory utilisation",
+      "description": "A steady climb here is a leak. The device works until it abruptly does not — usually during a reconvergence, when it needs memory it no longer has.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "targets": [
+        { "refId": "A", "expr": "cisco_memory_used_percent{instance=~\"$device\"}", "legendFormat": "{{instance}}" }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"], "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never", "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "red", "value": 85 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "state-timeline",
+      "title": "Device reachability",
+      "description": "Each device as an up/down band. Short outages that resolve before anyone looks are visible here and nowhere else.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
+      "targets": [
+        { "refId": "A", "expr": "probe_success{probe_type=\"device\", site=~\"$site\"}", "legendFormat": "{{instance}}" }
+      ],
+      "options": { "legend": { "showLegend": false }, "mergeValues": true, "showValue": "never", "rowHeight": 0.85 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 85, "lineWidth": 0 },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "up", "color": "green", "index": 1 } } }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Logs",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }
+    },
+    {
+      "id": 30,
+      "type": "logs",
+      "title": "Configuration changes and critical events",
+      "description": "Live tail. A configuration change appearing here without a corresponding change record is worth a conversation.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 42 },
+      "targets": [
+        { "refId": "A", "expr": "{job=\"network-syslog\"} |~ \"CONFIG_I|SEC_LOGIN|ADJCHANGE|ADJCHG|STATECHANGE|PSECURE\"" }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true }
+    }
+  ]
+}
