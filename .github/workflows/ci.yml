@@ -1,0 +1,158 @@
+---
+name: Lint and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install --quiet -r automation/python/requirements.txt
+      - name: Lint
+        run: ruff check automation/python
+      - name: Test
+        run: |
+          PYTHONPATH=automation/python pytest tests/ -v --tb=short
+
+  yaml:
+    name: YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet yamllint
+      - run: yamllint -c .yamllint.yml automation monitoring lab cisco/baselines
+
+  shell:
+    name: Shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: find automation/bash lab -name '*.sh' -print0 | xargs -0 -r shellcheck -x
+
+  templates:
+    name: Jinja2 templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install --quiet jinja2 pyyaml
+      - name: Every template parses
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader, TemplateSyntaxError
+
+          root = Path("cisco/templates")
+          env = Environment(loader=FileSystemLoader(root), keep_trailing_newline=True)
+
+          failed = False
+          for template in sorted(root.rglob("*.j2")):
+              name = str(template.relative_to(root))
+              try:
+                  env.get_template(name)
+                  print(f"ok    {name}")
+              except TemplateSyntaxError as exc:
+                  print(f"FAIL  {name}: line {exc.lineno}: {exc.message}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+  ansible:
+    name: Ansible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install --quiet "ansible-core>=2.15" ansible-lint
+      - run: ansible-galaxy collection install -r automation/ansible/requirements.yml
+      - name: Inventory parses
+        run: ansible-inventory -i automation/ansible/inventory/devices.yml --list > /dev/null
+      - name: Playbooks parse
+        run: |
+          for pb in automation/ansible/playbooks/*.yml; do
+            echo "::group::$pb"
+            ansible-playbook --syntax-check -i automation/ansible/inventory/devices.yml "$pb"
+            echo "::endgroup::"
+          done
+
+  config:
+    name: Monitoring configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prometheus configuration and rules
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/cfg" \
+            --entrypoint promtool prom/prometheus:v2.54.1 \
+            check config /cfg/prometheus.yml
+          docker run --rm -v "$PWD/monitoring/prometheus:/cfg" \
+            --entrypoint promtool prom/prometheus:v2.54.1 \
+            check rules /cfg/alerts/network.yml
+      - name: Grafana dashboards are valid JSON
+        run: |
+          for f in monitoring/grafana/dashboards/*.json; do
+            python3 -c "import json; json.load(open('$f'))" && echo "ok: $f"
+          done
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No credentials committed
+        run: |
+          # Private key material
+          if git grep -nE 'BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY' -- . ; then
+            echo "::error::Private key material committed"; exit 1
+          fi
+          # A real SNMP community string — the thing the baseline forbids on devices
+          # must not appear in the repository either.
+          if git grep -nE '^\s*snmp-server community \w+' -- ':!*.md' ':!cisco/baselines/*' ':!tests/*'; then
+            echo "::error::SNMP community string committed"; exit 1
+          fi
+          # Plausible hardcoded credentials
+          if git grep -nEi '(password|secret|key)\s*[:=]\s*["'\''][^"'\''${][^"'\'']{7,}' \
+             -- ':!*.md' ':!*.example.yml' ':!tests/*' ':!cisco/templates/*' \
+             | grep -viE '(CHANGE-ME|changeme|example|lookup\(|\{\{)'; then
+            echo "::error::Possible hardcoded credential"; exit 1
+          fi
+          echo "No secrets detected"
+
+  baseline:
+    name: Baseline self-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install --quiet pyyaml pytest rich
+      - name: Every rule checks something and explains itself
+        run: |
+          # A compliance rule that checks nothing always passes, which is the
+          # failure mode that makes a whole audit worthless. Guard it in CI.
+          PYTHONPATH=automation/python pytest tests/test_compliance.py -v --tb=short
